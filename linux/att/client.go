@@ -461,6 +461,7 @@ func (c *Client) PrepareWrite(ctx context.Context, handle uint16, offset uint16,
 	req.SetAttributeOpcode()
 	req.SetAttributeHandle(handle)
 	req.SetValueOffset(offset)
+	req.SetPartAttributeValue(value)
 
 	b, err := c.sendReq(ctx, req)
 	if err != nil {
@@ -494,7 +495,7 @@ func (c *Client) ExecuteWrite(ctx context.Context, flags uint8) error {
 	}
 	defer func() { c.chTxBuf <- txBuf }()
 
-	req := ExecuteWriteRequest(txBuf[:1])
+	req := ExecuteWriteRequest(txBuf[:2])
 	req.SetAttributeOpcode()
 	req.SetFlags(flags)
 
@@ -533,6 +534,10 @@ func (c *Client) sendCmd(b []byte) error {
 	_, err := c.l2c.Write(b)
 	return err
 }
+
+// seqProtoTimeout is the ATT sequential-protocol transaction timeout
+// [Vol 3, Part F, 3.3.3]: the spec gives the server 30 seconds to respond.
+var seqProtoTimeout = 30 * time.Second
 
 // sendReq writes the request PDU and waits for its response. The wait is
 // bounded by ctx and by the 30s ATT sequential-protocol timeout. The l2c
@@ -578,7 +583,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			return nil, fmt.Errorf("ATT request failed: %w", err)
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(30 * time.Second):
+		case <-time.After(seqProtoTimeout):
 			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
 		}
 	}
