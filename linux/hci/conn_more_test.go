@@ -293,30 +293,35 @@ func TestHandleSignalDisconnectRequest(t *testing.T) {
 	}
 }
 
-// TestHandleSMP: any known SMP code answers with Pairing Failed via sendSMP;
-// with debug logging on, both smp debug dumps run. The closed connection
-// makes the underlying write fail, which sendSMP must return.
+// TestHandleSMP: any known SMP opcode answers with Pairing Failed via
+// sendSMP; with debug logging on, both smp debug dumps run. The closed
+// connection makes the underlying write fail, which sendSMP must return.
+// The pdu is a full L2CAP frame, as recombine delivers it off the wire.
 func TestHandleSMP(t *testing.T) {
 	debugLogger(t)
 	c := &Conn{
 		txBuffer: NewClient(NewPool(32, 1)),
 		chDone:   closedDone(),
 	}
-	if err := c.handleSMP(pdu{pairingRequest}); err != ErrClosed {
+	req := smpFrame([]byte{pairingRequest, 0x04, 0x00, 0x01, 0x10, 0x00, 0x00})
+	if err := c.handleSMP(req); err != ErrClosed {
 		t.Fatalf("handleSMP = %v, want ErrClosed from the failed send", err)
 	}
 }
 
-// TestHandleSMPReservedCode: reserved codes are ignored per spec.
+// TestHandleSMPReservedCode: reserved opcodes are ignored per spec. The
+// payload length (3) collides with a valid opcode (pairingConfirm), so this
+// also pins that classification uses the opcode byte, not the length byte.
 func TestHandleSMPReservedCode(t *testing.T) {
 	c := &Conn{}
-	if err := c.handleSMP(pdu{0xF0}); err != nil {
+	if err := c.handleSMP(smpFrame([]byte{0xF0, 0x00, 0x00})); err != nil {
 		t.Fatalf("handleSMP reserved code = %v, want nil", err)
 	}
 }
 
 // TestHandleSMPSendSuccess drives sendSMP through a successful write so the
-// smp send debug dump runs on the success path too.
+// smp send debug dump runs on the success path too, and checks the exact
+// bytes of the Pairing Failed frame put on the wire.
 func TestHandleSMPSendSuccess(t *testing.T) {
 	debugLogger(t)
 	skt := newFakeSkt()
@@ -326,11 +331,9 @@ func TestHandleSMPSendSuccess(t *testing.T) {
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 	}
-	if err := c.handleSMP(pdu{pairingRequest}); err != nil {
+	req := smpFrame([]byte{pairingRequest, 0x04, 0x00, 0x01, 0x10, 0x00, 0x00})
+	if err := c.handleSMP(req); err != nil {
 		t.Fatalf("handleSMP = %v, want nil", err)
 	}
-	w := skt.written()
-	if len(w) != 1 {
-		t.Fatalf("wrote %d packets, want 1", len(w))
-	}
+	assertPairingFailed(t, skt.written())
 }

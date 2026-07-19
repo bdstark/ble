@@ -1,7 +1,6 @@
 package hci
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -25,29 +24,41 @@ const (
 	pairingKeypress          = 0x0E // Pairing Keypress Notification LE-U
 )
 
+// smpPairingNotSupported is the Pairing Failed reason code for
+// "Pairing Not Supported". [Vol 3, Part H, 3.5.5]
+const smpPairingNotSupported = 0x05
+
+// sendSMP writes one SMP command as a B-frame on the SMP fixed channel
+// [Vol 3, Part A, 3.1]: length (2 bytes LE, the SMP command length only),
+// CID (2 bytes LE), then the command. Assembled with direct byte writes
+// (see writeACLData): binary.Write pays a reflection pass per call.
 func (c *Conn) sendSMP(p pdu) error {
-	buf := bytes.NewBuffer(make([]byte, 0))
-	if err := binary.Write(buf, binary.LittleEndian, uint16(4+len(p))); err != nil {
-		return err
-	}
-	if err := binary.Write(buf, binary.LittleEndian, cidSMP); err != nil {
-		return err
-	}
-	if err := binary.Write(buf, binary.LittleEndian, p); err != nil {
-		return err
-	}
-	_, err := c.writePDU(buf.Bytes())
+	frame := make([]byte, 4+len(p))
+	binary.LittleEndian.PutUint16(frame[0:2], uint16(len(p)))
+	binary.LittleEndian.PutUint16(frame[2:4], cidSMP)
+	copy(frame[4:], p)
 	if logDebugEnabled() {
-		ble.Logger.Debug("smp send", "pdu", fmt.Sprintf("[%X]", buf.Bytes()))
+		ble.Logger.Debug("smp send", "pdu", fmt.Sprintf("[%X]", frame))
 	}
+	_, err := c.writePDU(frame)
 	return err
 }
 
+// handleSMP responds to an incoming SMP command. p is the full L2CAP frame
+// as recombined off the wire (4-byte basic header + payload); the SMP opcode
+// is the first payload byte. Pairing is not implemented, so every recognized
+// command is answered with Pairing Failed / Pairing Not Supported.
 func (c *Conn) handleSMP(p pdu) error {
 	if logDebugEnabled() {
 		ble.Logger.Debug("smp recv", "pdu", fmt.Sprintf("[%X]", p))
 	}
-	code := p[0]
+	// A frame too short to carry an opcode is malformed; drop it rather
+	// than trusting the peer's framing.
+	if len(p) < 4+1 {
+		ble.Logger.Error("smp: dropping truncated PDU", "pdu", fmt.Sprintf("[%X]", p))
+		return nil
+	}
+	code := p.payload()[0]
 	switch code {
 	case pairingRequest:
 	case pairingResponse:
@@ -69,5 +80,5 @@ func (c *Conn) handleSMP(p pdu) error {
 	}
 	// FIXME: work aound to the lack of SMP implementation - always return non-supported.
 	// C.5.1 Pairing Not Supported by Slave
-	return c.sendSMP([]byte{pairingFailed, 0x05})
+	return c.sendSMP([]byte{pairingFailed, smpPairingNotSupported})
 }
