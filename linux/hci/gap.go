@@ -238,7 +238,16 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 	// The connection has been established, the cancel command
 	// failed with ErrDisallowed.
 	if err == ErrDisallowed {
-		return gatt.NewClient(<-h.chMasterConn)
+		// The connection-complete event should already be in flight;
+		// bound the wait in case it was lost.
+		select {
+		case c := <-h.chMasterConn:
+			return gatt.NewClient(c)
+		case <-h.done:
+			return nil, h.err
+		case <-time.After(5 * time.Second):
+			return nil, fmt.Errorf("hci: connection cancel disallowed but connection never arrived")
+		}
 	}
 	return nil, errors.Wrap(err, "cancel connection failed")
 }

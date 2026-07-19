@@ -253,7 +253,20 @@ func (h *HCI) send(c Command) ([]byte, error) {
 		return nil, h.err
 	}
 	p := &pkt{c, make(chan []byte)}
-	b := <-h.chCmdBufs
+	// Bounded: command buffers are returned by CommandComplete/Status
+	// events, which a wedged controller stops sending — a bare receive
+	// here parks the caller (including CancelConnection, the usual
+	// recovery path) forever.
+	var b []byte
+	select {
+	case b = <-h.chCmdBufs:
+	case <-h.done:
+		return nil, h.err
+	case <-time.After(10 * time.Second):
+		err := fmt.Errorf("hci: no command buffer available (controller not completing commands)")
+		h.close(err)
+		return nil, err
+	}
 	b[0] = byte(pktTypeCommand) // HCI header
 	b[1] = byte(c.OpCode())
 	b[2] = byte(c.OpCode() >> 8)

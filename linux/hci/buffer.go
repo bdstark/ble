@@ -2,7 +2,9 @@ package hci
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
+	"time"
 )
 
 // Pool ...
@@ -50,6 +52,25 @@ func (c *Client) Get() *bytes.Buffer {
 	b.Reset()
 	c.sent <- b
 	return b
+}
+
+// GetTimeout returns a buffer from the shared buffer pool, giving up
+// when done closes or after the timeout elapses. ACL buffers are
+// returned only by NumberOfCompletedPackets events from the
+// controller; on a connection that died without a processed
+// disconnect event those never arrive, and a bare Get would block its
+// caller forever.
+func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffer, error) {
+	select {
+	case b := <-c.p.ch:
+		b.Reset()
+		c.sent <- b
+		return b, nil
+	case <-done:
+		return nil, fmt.Errorf("hci: connection closed while waiting for ACL buffer")
+	case <-time.After(d):
+		return nil, fmt.Errorf("hci: timed out waiting for ACL buffer credits (dead connection?)")
+	}
 }
 
 // Put puts the oldest sent buffer back to the shared pool.

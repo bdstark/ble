@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 	"net"
 
 	"github.com/go-ble/ble"
@@ -13,6 +14,15 @@ import (
 	"github.com/go-ble/ble/linux/hci/evt"
 	"github.com/pkg/errors"
 )
+
+// ACLWriteTimeout bounds how long a write waits for ACL buffer
+// credits from the controller. Credits are only returned by
+// NumberOfCompletedPackets events; a connection that died without a
+// processed disconnect event never returns them, and unbounded waits
+// park the writer goroutine forever (observed in the field: a
+// write-without-response blocked for five hours). Long enough that a
+// merely congested link never trips it.
+var ACLWriteTimeout = 20 * time.Second
 
 // Conn ...
 type Conn struct {
@@ -206,7 +216,12 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 
 	for len(pdu) > 0 {
 		// Get a buffer from our pre-allocated and flow-controlled pool.
-		pkt := c.txBuffer.Get() // ACL pkt
+		// Bounded: credits come back only via NumberOfCompletedPackets,
+		// which a dead link never sends.
+		pkt, err := c.txBuffer.GetTimeout(c.chDone, ACLWriteTimeout) // ACL pkt
+		if err != nil {
+			return sent, err
+		}
 		flen := len(pdu)        // fragment length
 		if flen > pkt.Cap()-1-4 {
 			flen = pkt.Cap() - 1 - 4
