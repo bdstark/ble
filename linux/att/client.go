@@ -128,6 +128,42 @@ func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU 
 	return txMTU, nil
 }
 
+// roundTrip performs one ATT request-response transaction: it acquires the
+// shared tx buffer, lets build marshal the request PDU into it, sends the
+// request, and validates the response envelope. A well-formed ATT Error
+// Response (5 bytes) surfaces as ble.ATTError; a malformed error response,
+// an unexpected opcode, or a response shorter than minLen is
+// ErrInvalidResponse.
+//
+// The returned PDU is the response's own allocation (never the tx buffer),
+// so callers may hand out aliasing sub-slices with unbounded lifetime.
+func (c *Client) roundTrip(ctx context.Context, wantRsp byte, minLen int, build func(txBuf []byte) []byte) ([]byte, error) {
+	// Acquire and reuse the txBuf, and release it after usage.
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.chTxBuf <- txBuf }()
+
+	rsp, err := c.sendReq(ctx, build(txBuf))
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the response.
+	switch {
+	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
+		return nil, ble.ATTError(rsp[4])
+	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
+		fallthrough
+	case rsp[0] != wantRsp:
+		fallthrough
+	case len(rsp) < minLen:
+		return nil, ErrInvalidResponse
+	}
+	return rsp, nil
+}
+
 // FindInformation obtains the mapping of attribute handles with their associated types.
 // This allows a Client to discover the list of attributes and their types on a server.
 // [Vol 3, Part F, 3.4.3.1 & 3.4.3.2]
@@ -136,34 +172,20 @@ func (c *Client) FindInformation(ctx context.Context, starth, endh uint16) (fmt 
 		return 0x00, nil, ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
-	if err != nil {
-		return 0x00, nil, err
-	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := FindInformationRequest(txBuf[:5])
-	req.SetAttributeOpcode()
-	req.SetStartingHandle(starth)
-	req.SetEndingHandle(endh)
-
-	b, err := c.sendReq(ctx, req)
+	b, err := c.roundTrip(ctx, FindInformationResponseCode, 6, func(txBuf []byte) []byte {
+		req := FindInformationRequest(txBuf[:5])
+		req.SetAttributeOpcode()
+		req.SetStartingHandle(starth)
+		req.SetEndingHandle(endh)
+		return req
+	})
 	if err != nil {
 		return 0x00, nil, err
 	}
 
-	// Convert and validate the response.
+	// The information data must hold complete entries of the declared format.
 	rsp := FindInformationResponse(b)
 	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return 0x00, nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 6:
-		fallthrough
 	case rsp.Format() == 0x01 && ((len(rsp)-2)%4) != 0:
 		fallthrough
 	case rsp.Format() == 0x02 && ((len(rsp)-2)%18) != 0:
@@ -193,34 +215,21 @@ func (c *Client) ReadByType(ctx context.Context, starth, endh uint16, uuid ble.U
 		return 0, nil, ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ReadByTypeRequest(txBuf[:5+len(uuid)])
-	req.SetAttributeOpcode()
-	req.SetStartingHandle(starth)
-	req.SetEndingHandle(endh)
-	req.SetAttributeType(uuid)
-
-	b, err := c.sendReq(ctx, req)
+	b, err := c.roundTrip(ctx, ReadByTypeResponseCode, 4, func(txBuf []byte) []byte {
+		req := ReadByTypeRequest(txBuf[:5+len(uuid)])
+		req.SetAttributeOpcode()
+		req.SetStartingHandle(starth)
+		req.SetEndingHandle(endh)
+		req.SetAttributeType(uuid)
+		return req
+	})
 	if err != nil {
 		return 0, nil, err
 	}
 
-	// Convert and validate the response.
+	// The data list must hold complete entries of the declared length.
 	rsp := ReadByTypeResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return 0, nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 4 || len(rsp.AttributeDataList())%int(rsp.Length()) != 0:
+	if len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
 		return 0, nil, ErrInvalidResponse
 	}
 	return int(rsp.Length()), rsp.AttributeDataList(), nil
@@ -229,73 +238,33 @@ func (c *Client) ReadByType(ctx context.Context, starth, endh uint16, uuid ble.U
 // Read requests the server to read the value of an attribute and return its
 // value in a Read Response. [Vol 3, Part F, 3.4.4.3 & 3.4.4.4]
 func (c *Client) Read(ctx context.Context, handle uint16) ([]byte, error) {
-
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
+	b, err := c.roundTrip(ctx, ReadResponseCode, 1, func(txBuf []byte) []byte {
+		req := ReadRequest(txBuf[:3])
+		req.SetAttributeOpcode()
+		req.SetAttributeHandle(handle)
+		return req
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ReadRequest(txBuf[:3])
-	req.SetAttributeOpcode()
-	req.SetAttributeHandle(handle)
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert and validate the response.
-	rsp := ReadResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 1:
-		return nil, ErrInvalidResponse
-	}
-	return rsp.AttributeValue(), nil
+	return ReadResponse(b).AttributeValue(), nil
 }
 
 // ReadBlob requests the server to read part of the value of an attribute at a
 // given offset and return a specific part of the value in a Read Blob Response.
 // [Vol 3, Part F, 3.4.4.5 & 3.4.4.6]
 func (c *Client) ReadBlob(ctx context.Context, handle, offset uint16) ([]byte, error) {
-
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
+	b, err := c.roundTrip(ctx, ReadBlobResponseCode, 1, func(txBuf []byte) []byte {
+		req := ReadBlobRequest(txBuf[:5])
+		req.SetAttributeOpcode()
+		req.SetAttributeHandle(handle)
+		req.SetValueOffset(offset)
+		return req
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ReadBlobRequest(txBuf[:5])
-	req.SetAttributeOpcode()
-	req.SetAttributeHandle(handle)
-	req.SetValueOffset(offset)
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert and validate the response.
-	rsp := ReadBlobResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 1:
-		return nil, ErrInvalidResponse
-	}
-	return rsp.PartAttributeValue(), nil
+	return ReadBlobResponse(b).PartAttributeValue(), nil
 }
 
 // ReadMultiple requests the server to read two or more values of a set of
@@ -310,39 +279,20 @@ func (c *Client) ReadMultiple(ctx context.Context, handles []uint16) ([]byte, er
 		return nil, ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
+	b, err := c.roundTrip(ctx, ReadMultipleResponseCode, 1, func(txBuf []byte) []byte {
+		req := ReadMultipleRequest(txBuf[:1+len(handles)*2])
+		req.SetAttributeOpcode()
+		p := req.SetOfHandles()
+		for _, h := range handles {
+			binary.LittleEndian.PutUint16(p, h)
+			p = p[2:]
+		}
+		return req
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ReadMultipleRequest(txBuf[:1+len(handles)*2])
-	req.SetAttributeOpcode()
-	p := req.SetOfHandles()
-	for _, h := range handles {
-		binary.LittleEndian.PutUint16(p, h)
-		p = p[2:]
-	}
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert and validate the response.
-	rsp := ReadMultipleResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 1:
-		return nil, ErrInvalidResponse
-	}
-	return rsp.SetOfValues(), nil
+	return ReadMultipleResponse(b).SetOfValues(), nil
 }
 
 // ReadByGroupType obtains the values of attributes where the attribute type is known,
@@ -353,39 +303,23 @@ func (c *Client) ReadByGroupType(ctx context.Context, starth, endh uint16, uuid 
 		return 0, nil, ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ReadByGroupTypeRequest(txBuf[:5+len(uuid)])
-	req.SetAttributeOpcode()
-	req.SetStartingHandle(starth)
-	req.SetEndingHandle(endh)
-	req.SetAttributeGroupType(uuid)
-
-	b, err := c.sendReq(ctx, req)
+	b, err := c.roundTrip(ctx, ReadByGroupTypeResponseCode, 4, func(txBuf []byte) []byte {
+		req := ReadByGroupTypeRequest(txBuf[:5+len(uuid)])
+		req.SetAttributeOpcode()
+		req.SetStartingHandle(starth)
+		req.SetEndingHandle(endh)
+		req.SetAttributeGroupType(uuid)
+		return req
+	})
 	if err != nil {
 		return 0, nil, err
 	}
 
-	// Convert and validate the response.
+	// The data list must hold complete entries of the declared length.
 	rsp := ReadByGroupTypeResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return 0, nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 4:
-		fallthrough
-	case len(rsp.AttributeDataList())%int(rsp.Length()) != 0:
+	if len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
 		return 0, nil, ErrInvalidResponse
 	}
-
 	return int(rsp.Length()), rsp.AttributeDataList(), nil
 }
 
@@ -396,34 +330,14 @@ func (c *Client) Write(ctx context.Context, handle uint16, value []byte) error {
 		return ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := WriteRequest(txBuf[:3+len(value)])
-	req.SetAttributeOpcode()
-	req.SetAttributeHandle(handle)
-	req.SetAttributeValue(value)
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	// Convert and validate the response.
-	rsp := WriteResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		return ErrInvalidResponse
-	}
-	return nil
+	_, err := c.roundTrip(ctx, WriteResponseCode, 0, func(txBuf []byte) []byte {
+		req := WriteRequest(txBuf[:3+len(value)])
+		req.SetAttributeOpcode()
+		req.SetAttributeHandle(handle)
+		req.SetAttributeValue(value)
+		return req
+	})
+	return err
 }
 
 // WriteCommand requests the server to write the value of an attribute, typically
@@ -480,36 +394,18 @@ func (c *Client) PrepareWrite(ctx context.Context, handle uint16, offset uint16,
 		return 0, 0, nil, ErrInvalidArgument
 	}
 
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
+	b, err := c.roundTrip(ctx, PrepareWriteResponseCode, 5, func(txBuf []byte) []byte {
+		req := PrepareWriteRequest(txBuf[:5+len(value)])
+		req.SetAttributeOpcode()
+		req.SetAttributeHandle(handle)
+		req.SetValueOffset(offset)
+		req.SetPartAttributeValue(value)
+		return req
+	})
 	if err != nil {
 		return 0, 0, nil, err
 	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := PrepareWriteRequest(txBuf[:5+len(value)])
-	req.SetAttributeOpcode()
-	req.SetAttributeHandle(handle)
-	req.SetValueOffset(offset)
-	req.SetPartAttributeValue(value)
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-
-	// Convert and validate the response.
 	rsp := PrepareWriteResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return 0, 0, nil, ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		fallthrough
-	case len(rsp) < 5:
-		return 0, 0, nil, ErrInvalidResponse
-	}
 	return rsp.AttributeHandle(), rsp.ValueOffset(), rsp.PartAttributeValue(), nil
 }
 
@@ -517,34 +413,13 @@ func (c *Client) PrepareWrite(ctx context.Context, handle uint16, offset uint16,
 // values currently held in the prepare queue from this Client. This request shall be
 // handled by the server as an atomic operation. [Vol 3, Part F, 3.4.6.3 & 3.4.6.4]
 func (c *Client) ExecuteWrite(ctx context.Context, flags uint8) error {
-
-	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf, err := c.acquireTxBuf(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { c.chTxBuf <- txBuf }()
-
-	req := ExecuteWriteRequest(txBuf[:2])
-	req.SetAttributeOpcode()
-	req.SetFlags(flags)
-
-	b, err := c.sendReq(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	// Convert and validate the response.
-	rsp := ExecuteWriteResponse(b)
-	switch {
-	case rsp[0] == ErrorResponseCode && len(rsp) == 5:
-		return ble.ATTError(rsp[4])
-	case rsp[0] == ErrorResponseCode && len(rsp) != 5:
-		fallthrough
-	case rsp[0] != rsp.AttributeOpcode():
-		return ErrInvalidResponse
-	}
-	return nil
+	_, err := c.roundTrip(ctx, ExecuteWriteResponseCode, 0, func(txBuf []byte) []byte {
+		req := ExecuteWriteRequest(txBuf[:2])
+		req.SetAttributeOpcode()
+		req.SetFlags(flags)
+		return req
+	})
+	return err
 }
 
 // acquireTxBuf obtains the shared transmit buffer, giving up when ctx is

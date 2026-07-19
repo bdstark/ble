@@ -42,7 +42,7 @@ type Server struct {
 func NewServer(db *DB, l2c ble.Conn) (*Server, error) {
 	mtu := l2c.RxMTU()
 	if mtu < ble.DefaultMTU || mtu > ble.MaxMTU {
-		return nil, fmt.Errorf("invalid MTU")
+		return nil, fmt.Errorf("MTU %d out of range [%d, %d]: %w", mtu, ble.DefaultMTU, ble.MaxMTU, ErrInvalidMTU)
 	}
 	// Although the rxBuf is initialized with the capacity of rxMTU, it is
 	// not discovered, and only the default ATT_MTU (23 bytes) of it shall
@@ -70,7 +70,8 @@ func NewServer(db *DB, l2c ble.Conn) (*Server, error) {
 	return s, nil
 }
 
-// notify sends notification to remote central.
+// notify sends notification to remote central. The value is truncated to
+// what the negotiated MTU allows. [Vol 3, Part F, 3.4.7.1]
 func (s *Server) notify(h uint16, data []byte) (int, error) {
 	// Acquire and reuse notifyBuffer. Release it after usage.
 	nBuf := <-s.chNotBuf
@@ -79,16 +80,13 @@ func (s *Server) notify(h uint16, data []byte) (int, error) {
 	rsp := HandleValueNotification(nBuf)
 	rsp.SetAttributeOpcode()
 	rsp.SetAttributeHandle(h)
-	buf := bytes.NewBuffer(rsp.AttributeValue())
-	buf.Reset()
-	if len(data) > buf.Cap() {
-		data = data[:buf.Cap()]
-	}
-	buf.Write(data)
-	return s.conn.Write(rsp[:3+buf.Len()])
+	n := copy(rsp.AttributeValue(), data)
+	return s.conn.Write(rsp[:3+n])
 }
 
-// indicate sends indication to remote central.
+// indicate sends indication to remote central and waits for the confirmation
+// (bounded by the ATT sequential-protocol timeout [Vol 3, Part F, 3.3.3]).
+// The value is truncated to what the negotiated MTU allows.
 func (s *Server) indicate(h uint16, data []byte) (int, error) {
 	// Acquire and reuse indicateBuffer. Release it after usage.
 	iBuf := <-s.chIndBuf
@@ -97,13 +95,8 @@ func (s *Server) indicate(h uint16, data []byte) (int, error) {
 	rsp := HandleValueIndication(iBuf)
 	rsp.SetAttributeOpcode()
 	rsp.SetAttributeHandle(h)
-	buf := bytes.NewBuffer(rsp.AttributeValue())
-	buf.Reset()
-	if len(data) > buf.Cap() {
-		data = data[:buf.Cap()]
-	}
-	buf.Write(data)
-	n, err := s.conn.Write(rsp[:3+buf.Len()])
+	m := copy(rsp.AttributeValue(), data)
+	n, err := s.conn.Write(rsp[:3+m])
 	if err != nil {
 		return n, err
 	}
@@ -113,7 +106,7 @@ func (s *Server) indicate(h uint16, data []byte) (int, error) {
 			return 0, io.ErrClosedPipe
 		}
 		return n, nil
-	case <-time.After(time.Second * 30):
+	case <-time.After(seqProtoTimeout):
 		return 0, ErrSeqProtoTimeout
 	}
 }
@@ -153,9 +146,11 @@ func (s *Server) Loop() {
 		}
 	}()
 	for req := range seq {
-		if rsp := s.handleRequest(req.buf[:req.len]); rsp != nil {
-			if len(rsp) != 0 {
-				s.conn.Write(rsp)
+		if rsp := s.handleRequest(req.buf[:req.len]); len(rsp) != 0 {
+			if _, err := s.conn.Write(rsp); err != nil {
+				// The bearer is dying; the reader goroutine will observe the
+				// same failure and shut the loop down.
+				ble.Logger.Error("server: failed to write response", "err", err)
 			}
 		}
 		pool <- req
@@ -224,6 +219,12 @@ func (s *Server) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 	}
 
 	txMTU := int(r.ClientRxMTU())
+	// Don't trust the peer's advertised MTU past our own limit: the tx,
+	// notification, and indication buffers are sized for at most ble.MaxMTU
+	// (mirrors the client-side clamp in handleExchangeMTURequest).
+	if txMTU > ble.MaxMTU {
+		txMTU = ble.MaxMTU
+	}
 	s.conn.SetTxMTU(txMTU)
 
 	if txMTU != len(s.txBuf) {
@@ -257,8 +258,8 @@ func (s *Server) handleFindInformationRequest(r FindInformationRequest) []byte {
 	rsp := FindInformationResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
 	rsp.SetFormat(0x00)
-	buf := bytes.NewBuffer(rsp.InformationData())
-	buf.Reset()
+	data := rsp.InformationData()
+	n := 0
 
 	// Each response shall contain Types of the same format.
 	for _, a := range s.db.subrange(r.StartingHandle(), r.EndingHandle()) {
@@ -275,18 +276,19 @@ func (s *Server) handleFindInformationRequest(r FindInformationRequest) []byte {
 			break
 		}
 
-		if buf.Len()+2+a.typ.Len() > buf.Cap() {
+		if n+2+a.typ.Len() > len(data) {
 			break
 		}
-		binary.Write(buf, binary.LittleEndian, a.h)
-		binary.Write(buf, binary.LittleEndian, a.typ)
+		binary.LittleEndian.PutUint16(data[n:], a.h)
+		n += 2
+		n += copy(data[n:], a.typ)
 	}
 
 	// Nothing has been found.
 	if rsp.Format() == 0 {
 		return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), ble.ErrAttrNotFound)
 	}
-	return rsp[:2+buf.Len()]
+	return rsp[:2+n]
 }
 
 // handle Find By Type Value request. [Vol 3, Part F, 3.4.3.3 & 3.4.3.4]
@@ -301,8 +303,8 @@ func (s *Server) handleFindByTypeValueRequest(r FindByTypeValueRequest) []byte {
 
 	rsp := FindByTypeValueResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
-	buf := bytes.NewBuffer(rsp.HandleInformationList())
-	buf.Reset()
+	list := rsp.HandleInformationList()
+	n := 0
 
 	for _, a := range s.db.subrange(r.StartingHandle(), r.EndingHandle()) {
 		v, starth, endh := a.v, a.h, a.endh
@@ -318,23 +320,27 @@ func (s *Server) handleFindByTypeValueRequest(r FindByTypeValueRequest) []byte {
 			if e != ble.ErrSuccess || buf2.Len() > len(s.txBuf)-7 {
 				return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), ble.ErrInvalidHandle)
 			}
+			// BUG FIX: the handler-produced value was never adopted, so
+			// dynamic attributes could not match the requested value.
+			v = buf2.Bytes()
 			endh = a.h
 		}
 		if !(ble.UUID(v).Equal(ble.UUID(r.AttributeValue()))) {
 			continue
 		}
 
-		if buf.Len()+4 > buf.Cap() {
+		if n+4 > len(list) {
 			break
 		}
-		binary.Write(buf, binary.LittleEndian, starth)
-		binary.Write(buf, binary.LittleEndian, endh)
+		binary.LittleEndian.PutUint16(list[n:], starth)
+		binary.LittleEndian.PutUint16(list[n+2:], endh)
+		n += 4
 	}
-	if buf.Len() == 0 {
+	if n == 0 {
 		return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), ble.ErrAttrNotFound)
 	}
 
-	return rsp[:1+buf.Len()]
+	return rsp[:1+n]
 }
 
 // handle Read By Type request. [Vol 3, Part F, 3.4.4.1 & 3.4.4.2]
@@ -349,8 +355,8 @@ func (s *Server) handleReadByTypeRequest(r ReadByTypeRequest) []byte {
 
 	rsp := ReadByTypeResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
-	buf := bytes.NewBuffer(rsp.AttributeDataList())
-	buf.Reset()
+	list := rsp.AttributeDataList()
+	n := 0
 
 	// handle length (2 bytes) + value length.
 	// Each response shall only contains values with the same size.
@@ -378,24 +384,25 @@ func (s *Server) handleReadByTypeRequest(r ReadByTypeRequest) []byte {
 			if dlen > 255 {
 				dlen = 255
 			}
-			if dlen > buf.Cap() {
-				dlen = buf.Cap()
+			if dlen > len(list) {
+				dlen = len(list)
 			}
 			rsp.SetLength(uint8(dlen))
 		} else if 2+len(v) != dlen {
 			break
 		}
 
-		if buf.Len()+dlen > buf.Cap() {
+		if n+dlen > len(list) {
 			break
 		}
-		binary.Write(buf, binary.LittleEndian, a.h)
-		binary.Write(buf, binary.LittleEndian, v[:dlen-2])
+		binary.LittleEndian.PutUint16(list[n:], a.h)
+		copy(list[n+2:], v[:dlen-2])
+		n += dlen
 	}
 	if dlen == 0 {
 		return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), ble.ErrAttrNotFound)
 	}
-	return rsp[:2+buf.Len()]
+	return rsp[:2+n]
 }
 
 // handle Read request. [Vol 3, Part F, 3.4.4.3 & 3.4.4.4]
@@ -408,8 +415,6 @@ func (s *Server) handleReadRequest(r ReadRequest) []byte {
 
 	rsp := ReadResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
-	buf := bytes.NewBuffer(rsp.AttributeValue())
-	buf.Reset()
 
 	a, ok := s.db.at(r.AttributeHandle())
 	if !ok {
@@ -417,13 +422,18 @@ func (s *Server) handleReadRequest(r ReadRequest) []byte {
 	}
 
 	// Simple case. Read-only, no-authorization, no-authentication.
+	// The value is truncated to ATT_MTU-1 bytes [Vol 3, Part F, 3.4.4.4];
+	// the client reads the remainder with Read Blob. (The old bytes.Buffer
+	// grew silently past the tx buffer and panicked on the final slice.)
 	if a.v != nil {
-		binary.Write(buf, binary.LittleEndian, a.v)
-		return rsp[:1+buf.Len()]
+		n := copy(rsp.AttributeValue(), a.v)
+		return rsp[:1+n]
 	}
 
 	// Pass the request to upper layer with the ResponseWriter, which caps
 	// the buffer to a valid length of payload.
+	buf := bytes.NewBuffer(rsp.AttributeValue())
+	buf.Reset()
 	if e := handleATT(a, s, r, ble.NewResponseWriter(buf)); e != ble.ErrSuccess {
 		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), e)
 	}
@@ -445,17 +455,25 @@ func (s *Server) handleReadBlobRequest(r ReadBlobRequest) []byte {
 
 	rsp := ReadBlobResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
-	buf := bytes.NewBuffer(rsp.PartAttributeValue())
-	buf.Reset()
 
 	// Simple case. Read-only, no-authorization, no-authentication.
+	// Serve the part starting at the requested offset, truncated to
+	// ATT_MTU-1 bytes [Vol 3, Part F, 3.4.4.5]. (The old code ignored the
+	// offset and re-sent the value from the start, and its bytes.Buffer
+	// grew silently past the tx buffer and panicked on the final slice.)
 	if a.v != nil {
-		binary.Write(buf, binary.LittleEndian, a.v)
-		return rsp[:1+buf.Len()]
+		off := int(r.ValueOffset())
+		if off > len(a.v) {
+			return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), ble.ErrInvalidOffset)
+		}
+		n := copy(rsp.PartAttributeValue(), a.v[off:])
+		return rsp[:1+n]
 	}
 
 	// Pass the request to upper layer with the ResponseWriter, which caps
 	// the buffer to a valid length of payload.
+	buf := bytes.NewBuffer(rsp.PartAttributeValue())
+	buf.Reset()
 	if e := handleATT(a, s, r, ble.NewResponseWriter(buf)); e != ble.ErrSuccess {
 		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), e)
 	}
@@ -474,14 +492,27 @@ func (s *Server) handleReadByGroupRequest(r ReadByGroupTypeRequest) []byte {
 
 	rsp := ReadByGroupTypeResponse(s.txBuf)
 	rsp.SetAttributeOpcode()
-	buf := bytes.NewBuffer(rsp.AttributeDataList())
-	buf.Reset()
+	list := rsp.AttributeDataList()
+	n := 0
 
 	dlen := 0
 	for _, a := range s.db.subrange(r.StartingHandle(), r.EndingHandle()) {
+		// BUG FIX: only grouping attributes of the requested type belong in
+		// the response [Vol 3, Part F, 3.4.4.10]; the old code returned
+		// every attribute in the handle range regardless of its type.
+		if !a.typ.Equal(ble.UUID(r.AttributeGroupType())) {
+			continue
+		}
 		v := a.v
 		if v == nil {
-			buf2 := bytes.NewBuffer(make([]byte, buf.Cap()-buf.Len()-4))
+			free := len(list) - n - 4
+			if free < 0 {
+				break
+			}
+			// BUG FIX: the scratch buffer was allocated with a non-zero
+			// length, so the handler's output landed after that many
+			// zero bytes and the response carried zero padding as data.
+			buf2 := bytes.NewBuffer(make([]byte, 0, free))
 			if e := handleATT(a, s, r, ble.NewResponseWriter(buf2)); e != ble.ErrSuccess {
 				return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), e)
 			}
@@ -492,25 +523,26 @@ func (s *Server) handleReadByGroupRequest(r ReadByGroupTypeRequest) []byte {
 			if dlen > 255 {
 				dlen = 255
 			}
-			if dlen > buf.Cap() {
-				dlen = buf.Cap()
+			if dlen > len(list) {
+				dlen = len(list)
 			}
 			rsp.SetLength(uint8(dlen))
 		} else if 4+len(v) != dlen {
 			break
 		}
 
-		if buf.Len()+dlen > buf.Cap() {
+		if n+dlen > len(list) {
 			break
 		}
-		binary.Write(buf, binary.LittleEndian, a.h)
-		binary.Write(buf, binary.LittleEndian, a.endh)
-		binary.Write(buf, binary.LittleEndian, v[:dlen-4])
+		binary.LittleEndian.PutUint16(list[n:], a.h)
+		binary.LittleEndian.PutUint16(list[n+2:], a.endh)
+		copy(list[n+4:], v[:dlen-4])
+		n += dlen
 	}
 	if dlen == 0 {
 		return newErrorResponse(r.AttributeOpcode(), r.StartingHandle(), ble.ErrAttrNotFound)
 	}
-	return rsp[:2+buf.Len()]
+	return rsp[:2+n]
 }
 
 // handle Write request. [Vol 3, Part F, 3.4.5.1 & 3.4.5.2]
@@ -537,13 +569,16 @@ func (s *Server) handleWriteRequest(r WriteRequest) []byte {
 }
 
 func (s *Server) handlePrepareWriteRequest(r PrepareWriteRequest) []byte {
+	// Validate the request BEFORE touching any field: the fixed header is
+	// opcode + handle + offset = 5 bytes [Vol 3, Part F, 3.4.6.1]. The old
+	// < 3 check let a truncated PDU reach PartAttributeValue's r[5:] slice
+	// and panic the server.
+	switch {
+	case len(r) < 5:
+		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
+	}
 	if logDebugEnabled() {
 		ble.Logger.Debug("handlePrepareWriteRequest", "handle", r.AttributeHandle())
-	}
-	// Validate the request.
-	switch {
-	case len(r) < 3:
-		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
 	}
 
 	a, ok := s.db.at(r.AttributeHandle())
@@ -577,12 +612,20 @@ func (s *Server) handleExecuteWriteRequest(r ExecuteWriteRequest) []byte {
 	case 0:
 		// 0x00 – Cancel all prepared writes
 		s.prepareWriteRequestAttr = nil
+		s.prepareWriteRequestData.Reset()
 	case 1:
-		// 0x01 – Immediately write all pending prepared values
+		// 0x01 – Immediately write all pending prepared values.
+		// An empty queue executes trivially [Vol 3, Part F, 3.4.6.3]; the
+		// old code passed the nil attr into handleATT and panicked.
 		a := s.prepareWriteRequestAttr
+		if a == nil {
+			break
+		}
 		if e := handleATT(a, s, r, ble.NewResponseWriter(nil)); e != ble.ErrSuccess {
 			return newErrorResponse(r.AttributeOpcode(), 0, e)
 		}
+	default:
+		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
 	}
 
 	return []byte{ExecuteWriteResponseCode}
@@ -611,6 +654,12 @@ func (s *Server) handleWriteCommand(r WriteCommand) []byte {
 	return nil
 }
 
+// maxPreparedWriteBytes caps the total payload a peer may stage across
+// Prepare Write requests before Execute Write; beyond it the server answers
+// Prepare Queue Full [Vol 3, Part F, 3.4.6.1]. A variable so tests (or
+// embedders) can tune it.
+var maxPreparedWriteBytes = 512
+
 func newErrorResponse(op byte, h uint16, s ble.ATTError) []byte {
 	r := ErrorResponse(make([]byte, 5))
 	r.SetAttributeOpcode()
@@ -626,6 +675,12 @@ func handleATT(a *attr, s *Server, req []byte, rsp ble.ResponseWriter) ble.ATTEr
 	var data []byte
 	conn := s.conn
 	switch req[0] {
+	case FindByTypeValueRequestCode:
+		// The dynamic attribute's current value is needed for the match;
+		// without this case the request always failed with ErrReqNotSupp.
+		fallthrough
+	case ReadByGroupTypeRequestCode:
+		fallthrough
 	case ReadByTypeRequestCode:
 		fallthrough
 	case ReadRequestCode:
@@ -655,6 +710,12 @@ func handleATT(a *attr, s *Server, req []byte, rsp ble.ResponseWriter) ble.ATTEr
 			s.prepareWriteRequestAttr = a
 			s.prepareWriteRequestData.Reset()
 		}
+		// Bound the queue: the peer controls both the number of prepare
+		// writes and their payload sizes, so an unbounded append is a
+		// remote memory DoS.
+		if s.prepareWriteRequestData.Len()+len(data) > maxPreparedWriteBytes {
+			return ble.ErrPrepQueueFull
+		}
 		s.prepareWriteRequestData.Write(data)
 
 	case ExecuteWriteRequestCode:
@@ -664,6 +725,7 @@ func handleATT(a *attr, s *Server, req []byte, rsp ble.ResponseWriter) ble.ATTEr
 		data = s.prepareWriteRequestData.Bytes()
 		a.wh.ServeWrite(ble.NewRequest(conn, data, offset), rsp)
 		s.prepareWriteRequestAttr = nil
+		s.prepareWriteRequestData.Reset()
 	case WriteRequestCode:
 		fallthrough
 	case WriteCommandCode:
