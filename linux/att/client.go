@@ -3,12 +3,18 @@ package att
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-ble/ble"
 )
+
+// ErrInvalidMTU means the peer proposed an ATT MTU below the spec minimum
+// of 23 bytes (ble.DefaultMTU). [Vol 3, Part F, 3.4.2]
+var ErrInvalidMTU = errors.New("invalid MTU")
 
 // NotificationHandler handles notification or indication.
 //
@@ -22,8 +28,20 @@ type NotificationHandler interface {
 
 // Client implementa an Attribute Protocol Client.
 type Client struct {
-	l2c  ble.Conn
+	l2c ble.Conn
+
+	// rspc carries response PDUs from Loop to the waiting sendReq. It is
+	// buffered (cap 1) and Loop's send is non-blocking: ATT is a sequential
+	// protocol, so at most one response is outstanding, but a request can be
+	// abandoned (ctx cancellation or seqProtoTimeout) with its response still
+	// in flight. An unbuffered send of that late response would park Loop
+	// forever and wedge the whole inbound HCI path behind it.
 	rspc chan []byte
+
+	// rspDropped counts response PDUs Loop dropped because no request was
+	// waiting for them and the rspc buffer already held an unclaimed
+	// response (see RspDropped).
+	rspDropped atomic.Uint64
 
 	rxBuf   []byte
 	chTxBuf chan []byte
@@ -35,7 +53,7 @@ type Client struct {
 func NewClient(l2c ble.Conn, h NotificationHandler) *Client {
 	c := &Client{
 		l2c:     l2c,
-		rspc:    make(chan []byte),
+		rspc:    make(chan []byte, 1),
 		chTxBuf: make(chan []byte, 1),
 		rxBuf:   make([]byte, ble.MaxMTU),
 		chErr:   make(chan error, 1),
@@ -86,7 +104,17 @@ func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU 
 		return 0, ErrInvalidResponse
 	}
 
+	// Validate the server's MTU before adopting it: a value below the spec
+	// minimum would shrink txBuf under the fixed-size request headers and
+	// panic a later txBuf[:n] slice; an oversized one is capped at what we
+	// support.
 	txMTU := int(rsp.ServerRxMTU())
+	if txMTU < ble.DefaultMTU {
+		return 0, fmt.Errorf("server MTU %d below minimum %d: %w", txMTU, ble.DefaultMTU, ErrInvalidMTU)
+	}
+	if txMTU > ble.MaxMTU {
+		txMTU = ble.MaxMTU
+	}
 	if len(txBuf) != txMTU {
 		// Let L2CAP know the MTU that the remote device can handle.
 		c.l2c.SetTxMTU(txMTU)
@@ -549,8 +577,11 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	}
 	// Drain the response of an earlier abandoned request (ctx cancellation
 	// or ATT timeout), if one straggled in since: it would otherwise be
-	// mistaken for the response to this request, or park the read loop on
-	// the unbuffered rspc send.
+	// mistaken for the response to this request. rspc is buffered (cap 1)
+	// and Loop's send is non-blocking, so an unclaimed response sits in the
+	// buffer rather than parking Loop — and there is never more than one,
+	// because Loop drops (and counts) further responses while the buffer is
+	// full. A single non-blocking receive therefore fully empties it.
 	select {
 	case stale := <-c.rspc:
 		if logDebugEnabled() {
@@ -561,6 +592,11 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	if _, err := c.l2c.Write(b); err != nil {
 		return nil, fmt.Errorf("send ATT request failed: %w", err)
 	}
+	// One absolute deadline for the whole transaction [Vol 3, Part F, 3.3.3]:
+	// a per-iteration time.After would be reset by every unexpected PDU,
+	// letting a chatty peer extend the timeout indefinitely.
+	t := time.NewTimer(seqProtoTimeout)
+	defer t.Stop()
 	for {
 		select {
 		case rsp := <-c.rspc:
@@ -583,10 +619,17 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			return nil, fmt.Errorf("ATT request failed: %w", err)
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(seqProtoTimeout):
+		case <-t.C:
 			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
 		}
 	}
+}
+
+// RspDropped returns the number of response PDUs dropped because no request
+// was waiting for them, i.e. their requests had been abandoned by context
+// cancellation or the ATT sequential-protocol timeout.
+func (c *Client) RspDropped() uint64 {
+	return c.rspDropped.Load()
 }
 
 // pduPool recycles the buffers behind PDUs that are dispatched to the
@@ -640,7 +683,19 @@ func (c *Client) Loop() {
 			// to the library user — it needs its own allocation.
 			b := make([]byte, n)
 			copy(b, c.rxBuf)
-			c.rspc <- b
+			// Non-blocking: if the buffer already holds an unclaimed
+			// response (its request was abandoned by ctx cancellation or
+			// the ATT timeout), this one is stale too — drop it rather
+			// than park the read loop, which would wedge the whole
+			// inbound HCI path behind an ATT PDU nobody will receive.
+			select {
+			case c.rspc <- b:
+			default:
+				c.rspDropped.Add(1)
+				if logDebugEnabled() {
+					ble.Logger.Debug("client: dropping unclaimed rsp", "pdu", fmt.Sprintf("% X", b))
+				}
+			}
 			continue
 		}
 
@@ -712,22 +767,14 @@ func (c *Client) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 	// We do this first to prevent races with ExchangeMTURequest
 	txBuf := <-c.chTxBuf
 
-	// Validate the request.
-	switch {
-	case len(r) != 3:
-		fallthrough
-	case r.ClientRxMTU() < 23:
-		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
-	}
+	// The effective transmit MTU after this exchange. Until the request is
+	// validated it stays at the current value, so the deferred release
+	// restores the buffer unchanged on the error paths.
+	txMTU := len(txBuf)
 
-	txMTU := int(r.ClientRxMTU())
-	// Our rxMTU for the response
-	rxMTU := c.l2c.RxMTU()
-
-	// Update transmit MTU to max supported by the other side
-	ble.Logger.Debug("client: server requested an MTU change", "tx", txMTU, "rx", rxMTU)
-	c.l2c.SetTxMTU(txMTU)
-
+	// Release the buffer unconditionally, registered BEFORE any validation:
+	// an early return on a malformed request must not leave chTxBuf drained
+	// for good, which would deadlock every later request on this connection.
 	defer func() {
 		// Update the tx buffer if needed
 		if len(txBuf) != txMTU {
@@ -736,6 +783,27 @@ func (c *Client) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 			c.chTxBuf <- txBuf
 		}
 	}()
+
+	// Validate the request.
+	switch {
+	case len(r) != 3:
+		fallthrough
+	case r.ClientRxMTU() < ble.DefaultMTU:
+		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
+	}
+
+	txMTU = int(r.ClientRxMTU())
+	// Don't trust the peer's advertised MTU past our own limit: rxBuf and
+	// the tx buffer are sized for at most ble.MaxMTU.
+	if txMTU > ble.MaxMTU {
+		txMTU = ble.MaxMTU
+	}
+	// Our rxMTU for the response
+	rxMTU := c.l2c.RxMTU()
+
+	// Update transmit MTU to max supported by the other side
+	ble.Logger.Debug("client: server requested an MTU change", "tx", txMTU, "rx", rxMTU)
+	c.l2c.SetTxMTU(txMTU)
 
 	rsp := ExchangeMTUResponse(txBuf)
 	rsp.SetAttributeOpcode()
