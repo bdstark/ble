@@ -3,6 +3,7 @@ package att
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-ble/ble"
@@ -10,6 +11,11 @@ import (
 )
 
 // NotificationHandler handles notification or indication.
+//
+// The req slice is valid only for the duration of the HandleNotification
+// call: it is backed by a pooled buffer that is reused for later
+// notifications as soon as the handler returns. A handler that retains the
+// data past its return must copy it.
 type NotificationHandler interface {
 	HandleNotification(req []byte)
 }
@@ -512,12 +518,26 @@ func (c *Client) sendReq(b []byte) (rsp []byte, err error) {
 	}
 }
 
+// pduPool recycles the buffers behind PDUs that are dispatched to the
+// asyncWork consumer (notifications, indications, and incoming requests);
+// the consumer puts them back once the handler has returned, which is what
+// makes the NotificationHandler "valid only during the call" contract hold.
+//
+// Response PDUs are deliberately NOT pooled: sendReq hands them to the
+// request methods, which return aliasing sub-slices (e.g. Read returns
+// rsp.AttributeValue()) to callers with unbounded lifetime.
+var pduPool = sync.Pool{New: func() interface{} {
+	b := make([]byte, ble.MaxMTU)
+	return &b
+}}
+
 // Loop ...
 func (c *Client) Loop() {
 
 	type asyncWork struct {
 		handle func([]byte)
 		data   []byte
+		buf    *[]byte // pooled backing buffer; returned after handle runs
 	}
 
 	ch := make(chan asyncWork, 16)
@@ -525,6 +545,7 @@ func (c *Client) Loop() {
 	go func() {
 		for w := range ch {
 			w.handle(w.data)
+			pduPool.Put(w.buf)
 		}
 	}()
 
@@ -541,38 +562,50 @@ func (c *Client) Loop() {
 			return
 		}
 
-		b := make([]byte, n)
+		op := c.rxBuf[0]
+
+		if (op != ExchangeMTURequestCode) && (op != HandleValueNotificationCode) && (op != HandleValueIndicationCode) {
+			// Response PDU: it escapes to the sendReq caller and, aliased,
+			// to the library user — it needs its own allocation.
+			b := make([]byte, n)
+			copy(b, c.rxBuf)
+			c.rspc <- b
+			continue
+		}
+
+		// Copy into a pooled buffer; c.rxBuf is len(ble.MaxMTU), so n always
+		// fits. Do not touch b after a successful enqueue — the consumer may
+		// already have released it for reuse.
+		buf := pduPool.Get().(*[]byte)
+		b := (*buf)[:n]
 		copy(b, c.rxBuf)
 
 		// TODO: better request identification
-		if b[0] == ExchangeMTURequestCode {
+		if op == ExchangeMTURequestCode {
 			// Schedule this to be taken care of
 			select {
-			case ch <- asyncWork{handle: c.handleRequest, data: b}:
+			case ch <- asyncWork{handle: c.handleRequest, data: b, buf: buf}:
 			default:
+				pduPool.Put(buf)
 				// If this really happens, especially on a slow machine, enlarge the channel buffer.
 				ble.Logger.Error("client: can't enqueue incoming request")
 			}
 			continue
 		}
 
-		if (b[0] != HandleValueNotificationCode) && (b[0] != HandleValueIndicationCode) {
-			c.rspc <- b
-			continue
-		}
-
 		// Deliver the full request to upper layer.
 		select {
-		case ch <- asyncWork{handle: c.handler.HandleNotification, data: b}:
+		case ch <- asyncWork{handle: c.handler.HandleNotification, data: b, buf: buf}:
 		default:
+			pduPool.Put(buf)
 			// If this really happens, especially on a slow machine, enlarge the channel buffer.
 			ble.Logger.Error("client: can't enqueue incoming notification")
 		}
 
 		// Always write aknowledgement for an indication, even it was an invalid request.
-		if b[0] == HandleValueIndicationCode {
+		if op == HandleValueIndicationCode {
 			if logDebugEnabled() {
-				ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
+				ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", c.rxBuf[:n]))
 			}
 			_, _ = c.l2c.Write(confirmation)
 		}

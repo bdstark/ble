@@ -149,6 +149,11 @@ func Connect(ctx context.Context, f AdvFilter) (Client, error) {
 }
 
 // A NotificationHandler handles notification or indication from a server.
+//
+// The req slice is valid only for the duration of the call: on the linux
+// stack it is backed by a pooled buffer that is reused for later
+// notifications as soon as the handler returns. A handler that retains the
+// data past its return must copy it.
 type NotificationHandler func(req []byte)
 
 // WithSigHandler ...

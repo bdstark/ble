@@ -324,6 +324,44 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	return ret, err
 }
 
+// evtBufSize is the largest possible HCI event packet: 1 byte packet type,
+// 2 bytes event header, up to 255 bytes of parameters.
+const evtBufSize = 1 + 2 + 255
+
+// evtPool recycles buffers for the HCI event packets whose handlers provably
+// release them before handlePkt returns (see poolableEvtPkt).
+var evtPool = sync.Pool{New: func() interface{} {
+	b := make([]byte, evtBufSize)
+	return &b
+}}
+
+// poolableEvtPkt reports whether the raw HCI packet is an event whose handler
+// provably releases the buffer before handlePkt returns:
+//   - CommandComplete: handleCommandComplete copies ReturnParameters before
+//     handing them to the waiting sender.
+//   - CommandStatus: only fixed fields are read; the status byte sent onward
+//     is a fresh allocation.
+//   - NumberOfCompletedPackets: only fixed fields are read. This is the hot
+//     one — the controller sends it continuously to return ACL credits
+//     during data transfer.
+//
+// Everything else escapes with a consumer-determined lifetime and must keep
+// its own allocation: ACL data aliases into conn.chInPkt/chInPDU and is only
+// released when (or after) Conn.Read consumes the PDU; LE advertising
+// reports are retained by Advertisement (adHist and the adv dispatcher);
+// connection complete/disconnect events are retained in Conn.param and
+// handed to user callbacks.
+func poolableEvtPkt(b []byte) bool {
+	if len(b) < 2 || len(b) > evtBufSize || b[0] != pktTypeEvent {
+		return false
+	}
+	switch int(b[1]) {
+	case evt.CommandCompleteCode, evt.CommandStatusCode, evt.NumberOfCompletedPacketsCode:
+		return true
+	}
+	return false
+}
+
 func (h *HCI) sktLoop() {
 	b := make([]byte, 4096)
 	defer close(h.done)
@@ -337,9 +375,20 @@ func (h *HCI) sktLoop() {
 			}
 			return
 		}
-		p := make([]byte, n)
+		var p []byte
+		var pooled *[]byte
+		if poolableEvtPkt(b[:n]) {
+			pooled = evtPool.Get().(*[]byte)
+			p = (*pooled)[:n]
+		} else {
+			p = make([]byte, n)
+		}
 		copy(p, b)
-		if err := h.handlePkt(p); err != nil {
+		err = h.handlePkt(p)
+		if pooled != nil {
+			evtPool.Put(pooled)
+		}
+		if err != nil {
 			// Some bluetooth devices may append vendor specific packets at the last,
 			// in this case, simply ignore them.
 			if strings.HasPrefix(err.Error(), "unsupported vendor packet:") {
@@ -520,7 +569,13 @@ func (h *HCI) handleCommandComplete(b []byte) error {
 	if !found {
 		return fmt.Errorf("can't find the cmd for CommandCompleteEP: % X", e)
 	}
-	p.done <- e.ReturnParameters()
+	// ReturnParameters aliases the event buffer, and the send() caller parked
+	// on p.done keeps using it after this handler returns (Send passes it to
+	// Unmarshal) — hand over a copy so the event buffer can go back to
+	// evtPool. Command completions are cold path; the copy is cheap.
+	ret := make([]byte, len(e.ReturnParameters()))
+	copy(ret, e.ReturnParameters())
+	p.done <- ret
 	return nil
 }
 
