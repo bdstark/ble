@@ -166,6 +166,14 @@ func (c *conn) ReadRSSI() (int, error) {
 	}
 }
 
+// UpdateParams is not supported on the CoreBluetooth backend: macOS manages
+// connection parameters itself and exposes no central-side update API. It
+// returns a wrapped ble.ErrNotImplemented so the ble.Conn interface stays
+// satisfied and callers can detect the unsupported case with errors.Is.
+func (c *conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
+	return fmt.Errorf("darwin: connection parameter update: %w", ble.ErrNotImplemented)
+}
+
 // processChrRead handles an incoming read response.  CoreBluetooth does not
 // distinguish explicit reads from unsolicited notifications.  This function
 // identifies which type the incoming message is.

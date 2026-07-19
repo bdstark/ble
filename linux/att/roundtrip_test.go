@@ -154,7 +154,10 @@ func (p *pipeConn) SetRxMTU(mtu int)               { p.rx.Store(int64(mtu)) }
 func (p *pipeConn) TxMTU() int                     { return int(p.tx.Load()) }
 func (p *pipeConn) SetTxMTU(mtu int)               { p.tx.Store(int64(mtu)) }
 func (p *pipeConn) ReadRSSI() (int, error)         { return 0, nil }
-func (p *pipeConn) Disconnected() <-chan struct{}  { return nil }
+func (p *pipeConn) UpdateParams(context.Context, ble.ConnParams) error {
+	return nil
+}
+func (p *pipeConn) Disconnected() <-chan struct{} { return nil }
 
 // valueRecorder collects handler-written values under a lock (the server
 // runs in its own goroutine).

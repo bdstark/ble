@@ -815,7 +815,32 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 	return nil
 }
 
+// handleLEConnectionUpdateComplete dispatches an LE Connection Update Complete
+// meta event to the connection that requested the update, if it is still
+// registered and still has a waiter (see Conn.UpdateParams). It runs on the
+// sktLoop goroutine, so it must never block: the conn lookup mirrors
+// handleDisconnectionComplete (guarded by muConns), and deliverConnUpdate does
+// a non-blocking send. A completion with no matching conn (torn down) or no
+// registered waiter (a slave-forwarded update from signal.go, or the waiter
+// already gave up) is a harmless no-op.
 func (h *HCI) handleLEConnectionUpdateComplete(b []byte) error {
+	e := evt.LEConnectionUpdateComplete(b)
+	h.muConns.Lock()
+	c, found := h.conns[e.ConnectionHandle()]
+	h.muConns.Unlock()
+	if !found {
+		if logDebugEnabled() {
+			ble.Logger.Debug("hci: LE connection update complete for unknown handle",
+				"handle", e.ConnectionHandle(), "status", e.Status())
+		}
+		return nil
+	}
+	c.deliverConnUpdate(leConnUpdate{
+		status:   e.Status(),
+		interval: e.ConnInterval(),
+		latency:  e.ConnLatency(),
+		timeout:  e.SupervisionTimeout(),
+	})
 	return nil
 }
 

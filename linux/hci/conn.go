@@ -87,7 +87,47 @@ type Conn struct {
 
 	// leFrame is set to be true when the LE Credit based flow control is used.
 	leFrame bool
+
+	// muUpdate guards updateWaiter and serializes UpdateParams: at most one
+	// LE Connection Update may be in flight per connection. updateWaiter is
+	// the buffered (cap 1) channel a pending UpdateParams parks on; it is
+	// non-nil only while an update waits, and only UpdateParams ever
+	// registers or clears it. handleLEConnectionUpdateComplete (on sktLoop)
+	// reads it under muUpdate and does a non-blocking send — never a close —
+	// so a stale, duplicate, or slave-forwarded completion can neither block
+	// sktLoop nor send on a closed channel. See UpdateParams for the full
+	// interleaving analysis.
+	muUpdate     sync.Mutex
+	updateWaiter chan leConnUpdate
 }
+
+// leConnUpdate carries the fields of an LE Connection Update Complete meta
+// event from sktLoop to a waiting UpdateParams. It is a value copy (not the
+// pooled/aliased event buffer) so its lifetime is independent of sktLoop.
+type leConnUpdate struct {
+	status   uint8
+	interval uint16
+	latency  uint16
+	timeout  uint16
+}
+
+var (
+	// ErrUpdateInProgress is returned by Conn.UpdateParams when an LE
+	// Connection Update is already in flight on the same connection. Only one
+	// update may be outstanding at a time; callers should serialize or retry.
+	ErrUpdateInProgress = errors.New("hci: connection parameter update already in progress")
+
+	// ErrConnUpdateTimeout is returned when the controller accepts the LE
+	// Connection Update command (a command status) but never delivers the
+	// LE Connection Update Complete meta event within connUpdateTimeout.
+	ErrConnUpdateTimeout = errors.New("hci: timed out waiting for LE connection update completion")
+)
+
+// connUpdateTimeout bounds how long UpdateParams waits for the controller's
+// LE Connection Update Complete meta event after the command is accepted.
+// Longer than the maximum supervision timeout (32 s) so a legitimately slow
+// update is not cut short; a package var so tests can lower it.
+var connUpdateTimeout = 40 * time.Second
 
 func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 	c := &Conn{
@@ -382,6 +422,125 @@ func (c *Conn) ReadRSSI() (int, error) {
 		return 0, fmt.Errorf("hci: read RSSI: %w", err)
 	}
 	return int(rp.RSSI), nil
+}
+
+// UpdateParams issues an LE Connection Update (0x08|0x0013) on this central
+// link and blocks until the controller reports it complete. The daemon uses
+// this to connect fast (a short interval for quick GATT discovery) then relax
+// each of its concurrent links to reduce 2.4 GHz contention.
+//
+// p is validated and converted by ble.ConnParams.Encode; an out-of-range
+// field returns ErrInvalidConnParams (wrapped) without touching the
+// controller. c.hci.Send returns once the controller acknowledges the command
+// with a *command status* — the command was accepted, not that the parameters
+// changed. The actual result arrives LATER as an LE Connection Update Complete
+// meta event, delivered by sktLoop → handleLEConnectionUpdateComplete →
+// deliverConnUpdate to the waiter registered below. A non-zero status in that
+// event is returned as the matching ErrCommand.
+//
+// Only one update may be in flight per connection: a second concurrent call
+// returns ErrUpdateInProgress rather than racing the first for the single
+// completion event.
+//
+// Concurrency & teardown. muUpdate serializes registration and guards
+// updateWaiter; chDone is closed exactly once by closeChans on teardown. The
+// waiter channel is created fresh here, is buffered (cap 1), and is never
+// closed — deliverConnUpdate only ever does a non-blocking send — so no
+// interleaving can send on a closed channel or block sktLoop. The relevant
+// interleavings:
+//
+//  1. Normal: register waiter, Send accepted, meta event → deliverConnUpdate
+//     sends the result, the select below receives it, defer clears the waiter.
+//  2. ctx cancel / timeout mid-wait: the select returns ctx.Err() /
+//     ErrConnUpdateTimeout and defer clears the waiter. A late meta event
+//     finds the waiter either still registered (buffered send, then cleared
+//     and GC'd) or already nil (skipped) — both harmless.
+//  3. Disconnect mid-wait: closeChans closes chDone (the select's teardown
+//     arm fires, ErrClosed) and handleDisconnectionComplete removes the conn
+//     from h.conns; both run on sktLoop, so a later meta event's handle
+//     lookup misses and is a no-op. Any meta event that landed first does a
+//     buffered/dropped send to a waiter that has moved on — harmless.
+//  4. No-waiter completion: a slave-forwarded update (signal.go, fire and
+//     forget) or a completion racing teardown finds updateWaiter nil and is a
+//     no-op — it never wedges sktLoop.
+//  5. Teardown racing registration: the chDone check under muUpdate below
+//     rejects a registration once teardown started; if chDone closes just
+//     after, the select's teardown arm handles it.
+func (c *Conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
+	imin, imax, latency, timeout, err := p.Encode()
+	if err != nil {
+		return err
+	}
+
+	ch := make(chan leConnUpdate, 1)
+	c.muUpdate.Lock()
+	if c.updateWaiter != nil {
+		c.muUpdate.Unlock()
+		return ErrUpdateInProgress
+	}
+	// Refuse to register on an already-torn-down link: without this the Send
+	// below would fail with ErrClosed anyway, but checking here keeps the
+	// waiter map honest and avoids a pointless command attempt.
+	select {
+	case <-c.chDone:
+		c.muUpdate.Unlock()
+		return ErrClosed
+	default:
+	}
+	c.updateWaiter = ch
+	c.muUpdate.Unlock()
+
+	defer func() {
+		c.muUpdate.Lock()
+		c.updateWaiter = nil
+		c.muUpdate.Unlock()
+	}()
+
+	// Send returns the command STATUS (command accepted), not the result.
+	if err := c.hci.Send(&cmd.LEConnectionUpdate{
+		ConnectionHandle:   c.param.ConnectionHandle(),
+		ConnIntervalMin:    imin,
+		ConnIntervalMax:    imax,
+		ConnLatency:        latency,
+		SupervisionTimeout: timeout,
+		MinimumCELength:    0, // Informational; spec doesn't specify the use.
+		MaximumCELength:    0, // Informational; spec doesn't specify the use.
+	}, nil); err != nil {
+		return fmt.Errorf("hci: LE connection update: %w", err)
+	}
+
+	select {
+	case u := <-ch:
+		if u.status != 0x00 {
+			return fmt.Errorf("hci: LE connection update failed: %w", ErrCommand(u.status))
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.chDone:
+		return ErrClosed
+	case <-time.After(connUpdateTimeout):
+		return fmt.Errorf("hci: LE connection update: %w", ErrConnUpdateTimeout)
+	}
+}
+
+// deliverConnUpdate hands an LE Connection Update Complete result to a waiting
+// UpdateParams, if one is registered. It runs on the sktLoop goroutine (via
+// handleLEConnectionUpdateComplete) and must never block it: the send is
+// non-blocking onto a cap-1 channel that is never closed, so a duplicate
+// completion, a completion for a slave-forwarded update with no waiter, or one
+// racing the waiter's own cleanup are all harmless.
+func (c *Conn) deliverConnUpdate(u leConnUpdate) {
+	c.muUpdate.Lock()
+	ch := c.updateWaiter
+	c.muUpdate.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- u:
+	default:
+	}
 }
 
 // closeChans closes chInPkt and chDone, exactly once, in that order.

@@ -63,7 +63,10 @@ func (f *fakeConn) SetRxMTU(mtu int)               {}
 func (f *fakeConn) TxMTU() int                     { return ble.DefaultMTU }
 func (f *fakeConn) SetTxMTU(mtu int)               {}
 func (f *fakeConn) ReadRSSI() (int, error)         { return -42, nil }
-func (f *fakeConn) Disconnected() <-chan struct{}  { return f.closed }
+func (f *fakeConn) UpdateParams(context.Context, ble.ConnParams) error {
+	return nil
+}
+func (f *fakeConn) Disconnected() <-chan struct{} { return f.closed }
 
 // fakeServer models a tiny GATT server: one primary service (handles 1-5)
 // holding one characteristic (declaration 2, value 3) and its CCCD (handle
