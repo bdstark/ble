@@ -20,8 +20,8 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **92.1%** (627/681) |
-| Added lines excluding `darwin/` | **98.6%** (627/636) |
+| All added lines | **92.0%** (988/1074) |
+| Added lines excluding `darwin/` | **99.4%** (988/994) |
 
 Every changed file is at 100% of its added lines except the four below.
 The linux backend is pure Go above the socket layer, so all of it —
@@ -29,7 +29,8 @@ including `linux/hci` and `linux/att` — builds and tests on any platform.
 
 ## Documented exclusions (why 90%+ overall is not attainable)
 
-**`darwin/` — 45 lines, 0% (the entire shortfall).** The changed lines are
+**`darwin/` — 80 lines, 0% (the entire shortfall; `darwin/option.go` is
+now fully covered by the package's first unit tests).** The changed lines are
 `ctx.Done()` arms in selects that otherwise wait on CoreBluetooth delegate
 events, plus the context-threaded method signatures around them. The
 backend drives `cbgo`, whose peripheral/central types are concrete structs
@@ -54,17 +55,20 @@ theoretical maximum for unit tests is 89.6%.
   the HCI's unexported master-conn channel; hardware only.
 
 **`linux/hci/hci.go` — 1 line.**
-- `173` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
+- `179` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
   first and cannot get past that without a device; `advDispatcher` itself
   is fully covered by direct tests. (The former exclusion for `send`'s
   `h.err` done-arm is gone: with `h.err` behind `muErr` the arm is
-  race-safely testable and now covered.)
+  race-safely testable and now covered. The former ReadRSSI exclusion in
+  conn.go is gone too: the `(int, error)` rework landed with tests.)
 
-**`linux/hci/conn.go` — 4 lines (temporary).**
-- `375-378` (`ReadRSSI` body): pre-existing code that entered the diff via
-  reformatting only. Deliberately not pinned: ReadRSSI is known-broken
-  (swallows the Send error, returns 0 on failure) and is queued for a
-  signature rework to `(int, error)`; tests land with that change.
+**`linux/hci/gap.go` — 1 line.**
+- `74` (`sr.Append(adv.ShortName(name))` arm): structurally dead upstream
+  code — ShortName appends the full string under the identical length
+  check the preceding CompleteName case just failed, so the arm can never
+  match. Entered the diff via a rename only; making it reachable would
+  mean changing ShortName to truncate, a deliberate upstream behavior
+  change tracked separately.
 
 **Not counted at all** (no coverable statements in the diff, or excluded
 by policy): `client.go` and `log.go` at the root (interface methods and a
