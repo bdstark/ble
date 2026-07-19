@@ -60,6 +60,20 @@ func TestRoundTripInvalidResponses(t *testing.T) {
 		t.Errorf("ReadByGroupType ragged rsp = %v, want ErrInvalidResponse", err)
 	}
 
+	// A peer-declared entry length of zero must be rejected, not divided
+	// by: the bare modulo panicked the central with integer divide-by-zero
+	// on the connect-time discovery path.
+	// Four bytes clears the minLen-4 envelope so the length byte reaches
+	// the modulo; 0x00 would divide by zero without the guard.
+	respondWith(f, []byte{ReadByTypeResponseCode, 0x00, 0xAA, 0xBB})
+	if _, _, err := c.ReadByType(ctx, 1, 0xFFFF, ble.UUID16(0x2A00)); err != ErrInvalidResponse {
+		t.Errorf("ReadByType zero-length rsp = %v, want ErrInvalidResponse", err)
+	}
+	respondWith(f, []byte{ReadByGroupTypeResponseCode, 0x00, 0xAA, 0xBB})
+	if _, _, err := c.ReadByGroupType(ctx, 1, 0xFFFF, ble.UUID16(0x2800)); err != ErrInvalidResponse {
+		t.Errorf("ReadByGroupType zero-length rsp = %v, want ErrInvalidResponse", err)
+	}
+
 	// A well-formed ATT error response surfaces as its typed error, a
 	// malformed one as ErrInvalidResponse — also on methods that return
 	// only an error.

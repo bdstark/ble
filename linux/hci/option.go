@@ -1,10 +1,8 @@
 package hci
 
 import (
-	"fmt"
 	"time"
 
-	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
 	"github.com/go-ble/ble/linux/hci/evt"
 )
@@ -57,14 +55,15 @@ func (h *HCI) SetAdvParams(param cmd.LESetAdvertisingParameters) error {
 	return nil
 }
 
-// SetPeripheralRole is not supported on the HCI backend; the role is fixed
-// by how the device is used. The error now propagates through Opt* closures
-// so callers find out instead of silently succeeding.
+// SetPeripheralRole is a no-op: the HCI backend advertises and accepts
+// connections as well as scanning and dialing, so both roles are always
+// available and requesting one needs no configuration. Returns nil to
+// match the darwin backend (which likewise runs both managers).
 func (h *HCI) SetPeripheralRole() error {
-	return fmt.Errorf("hci: SetPeripheralRole: %w", ble.ErrUnsupportedOption)
+	return nil
 }
 
-// SetCentralRole is not supported on the HCI backend; see SetPeripheralRole.
+// SetCentralRole is a no-op for the same reason as SetPeripheralRole.
 func (h *HCI) SetCentralRole() error {
-	return fmt.Errorf("hci: SetCentralRole: %w", ble.ErrUnsupportedOption)
+	return nil
 }

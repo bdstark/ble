@@ -227,9 +227,10 @@ func (c *Client) ReadByType(ctx context.Context, starth, endh uint16, uuid ble.U
 		return 0, nil, err
 	}
 
-	// The data list must hold complete entries of the declared length.
+	// The data list must hold complete entries of the declared length. The
+	// length byte is peer-controlled; reject zero before it divides.
 	rsp := ReadByTypeResponse(b)
-	if len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
+	if rsp.Length() < 1 || len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
 		return 0, nil, ErrInvalidResponse
 	}
 	return int(rsp.Length()), rsp.AttributeDataList(), nil
@@ -315,9 +316,10 @@ func (c *Client) ReadByGroupType(ctx context.Context, starth, endh uint16, uuid 
 		return 0, nil, err
 	}
 
-	// The data list must hold complete entries of the declared length.
+	// The data list must hold complete entries of the declared length. The
+	// length byte is peer-controlled; reject zero before it divides.
 	rsp := ReadByGroupTypeResponse(b)
-	if len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
+	if rsp.Length() < 1 || len(rsp.AttributeDataList())%int(rsp.Length()) != 0 {
 		return 0, nil, ErrInvalidResponse
 	}
 	return int(rsp.Length()), rsp.AttributeDataList(), nil

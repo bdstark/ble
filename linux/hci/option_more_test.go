@@ -2,7 +2,7 @@ package hci
 
 import (
 	"errors"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,10 +66,12 @@ func TestOptionSettersApply(t *testing.T) {
 	}
 }
 
-// TestOptionRoleUnsupported pins that the role options — silent successes
-// before the fix — now surface hci's "not supported" as the typed sentinel
-// through HCI.Option.
-func TestOptionRoleUnsupported(t *testing.T) {
+// TestOptionRoleNoOp pins that the role options are honored no-ops on the
+// HCI backend: it advertises and accepts connections as well as scanning and
+// dialing, so both roles are always available. Requesting one must not fail
+// device construction (it did briefly when the setters returned the
+// unsupported-option sentinel), matching the darwin backend.
+func TestOptionRoleNoOp(t *testing.T) {
 	h, err := NewHCI()
 	if err != nil {
 		t.Fatal(err)
@@ -81,50 +83,45 @@ func TestOptionRoleUnsupported(t *testing.T) {
 		{"SetPeripheralRole", ble.OptPeripheralRole()},
 		{"SetCentralRole", ble.OptCentralRole()},
 	} {
-		err := h.Option(tc.opt)
-		if !errors.Is(err, ble.ErrUnsupportedOption) {
-			t.Errorf("%s: err = %v, want ErrUnsupportedOption", tc.name, err)
-		}
-		if err != nil && !strings.Contains(err.Error(), tc.name) {
-			t.Errorf("%s: error does not name the option: %v", tc.name, err)
+		if err := h.Option(tc.opt); err != nil {
+			t.Errorf("%s: err = %v, want nil", tc.name, err)
 		}
 	}
 }
 
-// TestApplyOptionsMixedOnHCI applies a mix of valid and invalid options to a
-// real HCI via ble.ApplyOptions: both failures survive in the joined error
-// (each named, each errors.Is-matchable) and the valid option still lands.
+// TestApplyOptionsMixedOnHCI applies a mix of valid and failing options to a
+// real HCI via ble.ApplyOptions: every failure survives in the joined error
+// (each errors.Is-matchable) and the valid option still lands. Synthetic
+// failing options stand in because no real HCI setter is unsupported.
 func TestApplyOptionsMixedOnHCI(t *testing.T) {
 	h, err := NewHCI()
 	if err != nil {
 		t.Fatal(err)
 	}
+	errA := fmt.Errorf("option A: %w", ble.ErrUnsupportedOption)
+	errB := fmt.Errorf("option B: %w", ble.ErrUnsupportedOption)
 	err = ble.ApplyOptions(h,
-		ble.OptPeripheralRole(), // invalid on hci
-		ble.OptDeviceID(7),      // valid
-		ble.OptCentralRole(),    // invalid on hci
+		func(ble.DeviceOption) error { return errA },
+		ble.OptDeviceID(7), // valid
+		func(ble.DeviceOption) error { return errB },
 	)
-	if err == nil {
-		t.Fatal("ApplyOptions: err = nil, want joined unsupported-option errors")
+	if !errors.Is(err, errA) || !errors.Is(err, errB) {
+		t.Errorf("joined error lost a failure: %v", err)
 	}
 	if !errors.Is(err, ble.ErrUnsupportedOption) {
 		t.Errorf("joined error not matchable as ErrUnsupportedOption: %v", err)
-	}
-	for _, want := range []string{"SetPeripheralRole", "SetCentralRole"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("joined error missing %s: %v", want, err)
-		}
 	}
 	if h.id != 7 {
 		t.Errorf("valid option not applied alongside failures: id = %d, want 7", h.id)
 	}
 }
 
-// TestNewHCIUnsupportedRoleOption pins that an unsupported option passed at
-// construction fails NewHCI with the sentinel intact through the wrap.
-func TestNewHCIUnsupportedRoleOption(t *testing.T) {
-	_, err := NewHCI(ble.OptPeripheralRole())
-	if !errors.Is(err, ble.ErrUnsupportedOption) {
-		t.Fatalf("NewHCI(OptPeripheralRole): err = %v, want ErrUnsupportedOption", err)
+// TestNewHCIRoleOptionSucceeds pins that a role option passed at construction
+// does not fail NewHCI.
+func TestNewHCIRoleOptionSucceeds(t *testing.T) {
+	h, err := NewHCI(ble.OptPeripheralRole())
+	if err != nil {
+		t.Fatalf("NewHCI(OptPeripheralRole): err = %v, want nil", err)
 	}
+	_ = h
 }
