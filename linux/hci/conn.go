@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"time"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
@@ -60,6 +62,19 @@ type Conn struct {
 	chInPDU chan pdu
 
 	chDone chan struct{}
+
+	// closeOnce guards the closes of chInPkt and chDone (see closeChans):
+	// teardown can be initiated by a disconnect event, by whole-adapter
+	// cleanup after socket death, or (indirectly, via kill) by a wedged
+	// consumer or a corrupt inbound stream — any interleaving must close
+	// each channel exactly once.
+	closeOnce sync.Once
+
+	// killOnce bounds teardown initiation (see kill): repeated triggers —
+	// e.g. one dropped ACL packet per would-block hit in handleACL — must
+	// spawn exactly one Close goroutine.
+	killOnce sync.Once
+
 	// Host to Controller Data Flow Control pkt-based Data flow control for LE-U [Vol 2, Part E, 4.1.1]
 	// chSentBufs tracks the HCI buffer occupied by this connection.
 	txBuffer *Client
@@ -98,15 +113,37 @@ func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 
 	go func() {
 		for {
-			if err := c.recombine(); err != nil {
-				if err != io.EOF {
-					// TODO: wrap and pass the error up.
-					// err := errors.Wrap(err, "recombine failed")
-					ble.Logger.Error("recombine failed", "err", err)
-				}
-				close(c.chInPDU)
-				return
+			err := c.recombine()
+			if err == nil {
+				continue
 			}
+			// io.EOF is the clean exit (chInPkt closed by closeChans);
+			// ErrClosed means teardown landed while a PDU delivery was
+			// blocked on a reader that had already stopped. Anything
+			// else — oversized fragment, missing continuation flag —
+			// means the inbound L2CAP stream is corrupt and unrecoverable,
+			// so tear the whole connection down rather than go silent
+			// while handleACL keeps feeding a stream nobody can parse.
+			// (Log before the close below: the close is what observers
+			// wait on, so anything sequenced after it may outrun them.)
+			if err != io.EOF && !errors.Is(err, ErrClosed) {
+				ble.Logger.Error("recombine failed, closing connection", "err", err)
+				c.kill()
+			}
+			// Unblock current and future Reads: once chInPDU is closed,
+			// Read returns ErrClosed (wrapping io.ErrClosedPipe).
+			close(c.chInPDU)
+			// Keep draining chInPkt until closeChans closes it (the
+			// disconnect event answering kill's Disconnect, or
+			// HCI.cleanupConns on adapter death), so inbound ACL packets
+			// cannot back up — or trip handleACL's drop-and-kill path —
+			// in the interim. This goroutine is chInPkt's only consumer,
+			// so the drain cannot race another receive. On the io.EOF
+			// and ErrClosed paths chInPkt is already closed (closeChans
+			// closes it before chDone) and the loop exits immediately.
+			for range c.chInPkt {
+			}
+			return
 		}
 	}()
 	return c
@@ -228,7 +265,7 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 		if err != nil {
 			return sent, err
 		}
-		flen := len(pdu)        // fragment length
+		flen := len(pdu) // fragment length
 		if flen > pkt.Cap()-1-4 {
 			flen = pkt.Cap() - 1 - 4
 		}
@@ -300,7 +337,16 @@ func (c *Conn) recombine() error {
 	// TODO: support dynamic or assigned channels for LE-Frames.
 	switch p.cid() {
 	case cidLEAtt:
-		c.chInPDU <- p
+		// Bounded by the connection's lifetime: if the application stops
+		// calling Read, chInPDU fills and this send blocks. chDone
+		// unblocks it on teardown; a bare send would leak the recombine
+		// goroutine (parked here forever) every time a connection died
+		// with an unread PDU in flight.
+		select {
+		case c.chInPDU <- p:
+		case <-c.chDone:
+			return fmt.Errorf("connection closed while delivering PDU: %w", ErrClosed)
+		}
 	case cidLESignal:
 		c.handleSignal(p)
 	case cidSMP:
@@ -324,6 +370,53 @@ func (c *Conn) ReadRSSI() int {
 		Handle: c.param.ConnectionHandle(),
 	}, rp)
 	return int(rp.RSSI)
+}
+
+// closeChans closes chInPkt and chDone, exactly once, in that order.
+//
+// Teardown of a connection can be initiated by any of:
+//  1. handleDisconnectionComplete — a disconnect event, on the sktLoop
+//     goroutine;
+//  2. HCI.cleanupConns — socket death, on the sktLoop goroutine after its
+//     read loop has exited;
+//  3. Conn.Close / Conn.kill (handleACL overflow, recombine error) — these
+//     only *send* a Disconnect command; the closes themselves still land via
+//     1 (the resulting disconnect event) or 2 (if the adapter dies first).
+//
+// 1 and 2 cannot both reach the same conn: each takes the conn out of
+// h.conns under muConns before closing, and both run on the sktLoop
+// goroutine anyway (2 strictly after the last possible 1). The Once still
+// matters — it makes every interleaving, including a caller-driven double
+// teardown or a future third closer, panic-free by construction rather than
+// by that reasoning.
+//
+// Ordering matters twice:
+//   - chInPkt before chDone: anything that observes chDone closed (the
+//     recombine delivery select, writePDU) may rely on chInPkt already
+//     being closed, so the recombine goroutine's drain terminates.
+//   - callers must remove the conn from h.conns (under muConns) before
+//     calling closeChans, so handleACL — which runs on the same sktLoop
+//     goroutine as both closers — can never look up a conn whose chInPkt
+//     is closed and panic sending on it.
+func (c *Conn) closeChans() {
+	c.closeOnce.Do(func() {
+		close(c.chInPkt)
+		close(c.chDone)
+	})
+}
+
+// kill initiates asynchronous teardown of the connection, at most once, and
+// reports whether this call was the initiating one. The goroutine is
+// mandatory, not a convenience: Close sends a Disconnect command whose
+// completion event only sktLoop can process, so calling it synchronously
+// from sktLoop's own call path (handleACL) would self-deadlock.
+func (c *Conn) kill() bool {
+	initiated := false
+	c.killOnce.Do(func() {
+		initiated = true
+		go c.Close()
+	})
+	return initiated
 }
 
 // Close disconnects the connection by sending hci disconnect command to the device.

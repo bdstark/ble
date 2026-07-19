@@ -109,6 +109,11 @@ type HCI struct {
 	chAdv      chan *Advertisement
 	advDropped atomic.Uint64
 
+	// aclDropped counts inbound ACL data packets dropped because the
+	// owning connection's chInPkt was full (see handleACL); each drop
+	// coincides with that connection being torn down.
+	aclDropped atomic.Uint64
+
 	// Host to Controller Data Flow Control Packet-based Data flow control for LE-U [Vol 2, Part E, 4.1.1]
 	// Minimum 27 bytes. 4 bytes of L2CAP Header, and 23 bytes Payload from upper layer (ATT)
 	pool *Pool
@@ -414,6 +419,10 @@ func poolableEvtPkt(b []byte) bool {
 func (h *HCI) sktLoop() {
 	b := make([]byte, 4096)
 	defer close(h.done)
+	// LIFO with the defer above: connections are torn down (Disconnected()
+	// fires) before done closes, and after the loop below has recorded the
+	// fatal error — so Error() is accurate for anyone woken by either.
+	defer h.cleanupConns()
 	for {
 		n, err := h.skt.Read(b)
 		if n == 0 || err != nil {
@@ -454,11 +463,45 @@ func (h *HCI) sktLoop() {
 }
 
 func (h *HCI) close(err error) error {
+	// Record the error before tearing the socket down: the socket close
+	// ends sktLoop, whose exit path (cleanupConns) closes every conn's
+	// chDone — Disconnected() observers calling Error() must see the root
+	// cause, not nil.
 	h.setErr(err)
 	if h.skt != nil {
 		return h.skt.Close()
 	}
 	return err
+}
+
+// cleanupConns tears down every registered connection after the HCI
+// transport is gone (adapter reset, unplug, or an internal close). Without
+// it a socket death left each conn's channels open forever: the recombine
+// goroutines leaked, chDone never closed, and Disconnected()-driven
+// reconnect logic upstairs never fired — a notify-only peripheral simply
+// went silent for good.
+//
+// It runs on the sktLoop goroutine after the read loop has exited, so it
+// cannot race handleACL or handleDisconnectionComplete (same goroutine,
+// program order). Conns already torn down by a disconnect event were
+// removed from h.conns under muConns and are not revisited here; closeChans
+// tolerates any residual overlap regardless.
+func (h *HCI) cleanupConns() {
+	h.muConns.Lock()
+	conns := h.conns
+	h.conns = make(map[uint16]*Conn)
+	h.muConns.Unlock()
+	for _, c := range conns {
+		c.closeChans()
+		// Return the connection's outstanding TX credits, exactly as
+		// handleDisconnectionComplete does: with the transport gone no
+		// NumberOfCompletedPackets event will ever return them, and a
+		// writer mid-writePDU must not leak buffers from the shared
+		// pool (hence the pool lock).
+		c.txBuffer.LockPool()
+		c.txBuffer.PutAll()
+		c.txBuffer.UnlockPool()
+	}
 }
 
 func (h *HCI) handlePkt(b []byte) error {
@@ -489,8 +532,31 @@ func (h *HCI) handleACL(b []byte) error {
 		ble.Logger.Warn("invalid connection handle on ACL packet", "handle", handle)
 		return nil
 	}
-	c.chInPkt <- b
+	// Non-blocking: this runs on sktLoop, the single dispatcher for every
+	// connection on the adapter. A full chInPkt means this connection's
+	// recombine/Read pipeline has stopped consuming, and a blocking send
+	// here would park sktLoop and freeze ALL connections. Drop the packet
+	// and kill just this connection instead. Dropping mid-PDU ACL data
+	// corrupts this connection's L2CAP stream — which is fine, because we
+	// are tearing the connection down anyway.
+	select {
+	case c.chInPkt <- b:
+	default:
+		h.aclDropped.Add(1)
+		// kill is once-per-conn: a burst of would-block packets spawns
+		// exactly one teardown goroutine and logs one warning.
+		if c.kill() {
+			ble.Logger.Warn("hci: connection not consuming ACL data; dropping packet and closing connection", "handle", handle)
+		}
+	}
 	return nil
+}
+
+// ACLDropped returns the number of inbound ACL data packets dropped because
+// the owning connection stopped consuming them (see handleACL). Non-zero
+// means at least one connection was torn down for wedging its receive path.
+func (h *HCI) ACLDropped() uint64 {
+	return h.aclDropped.Load()
 }
 
 func (h *HCI) handleEvt(b []byte) error {
@@ -724,7 +790,15 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 	if !found {
 		return fmt.Errorf("disconnecting an invalid handle %04X", e.ConnectionHandle())
 	}
-	close(c.chInPkt)
+	// Close the conn's channels for both roles: chInPkt winds down the
+	// recombine goroutine, chDone signals Disconnected() and fails writes
+	// fast. (Historically chDone was closed for masters only, leaving a
+	// slave conn's Disconnected() silent forever and its writes free to
+	// sit out full credit timeouts on a dead link.) The conn was removed
+	// from h.conns above, so handleACL can no longer deliver to chInPkt;
+	// the guarded close makes any overlap with cleanupConns or a repeat
+	// teardown panic-free.
+	c.closeChans()
 
 	if c.param.Role() == roleSlave {
 		// Re-enable advertising, if it was advertising. Refer to the
@@ -736,9 +810,6 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 			go h.Send(&h.params.advEnable, nil)
 		}
 		h.params.RUnlock()
-	} else {
-		// remote peripheral disconnected
-		close(c.chDone)
 	}
 	// When a connection disconnects, all the sent packets and weren't acked yet
 	// will be recycled. [Vol2, Part E 4.1.1]
