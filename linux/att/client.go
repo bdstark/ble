@@ -3,7 +3,6 @@ package att
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,10 +10,6 @@ import (
 
 	"github.com/go-ble/ble"
 )
-
-// ErrInvalidMTU means the peer proposed an ATT MTU below the spec minimum
-// of 23 bytes (ble.DefaultMTU). [Vol 3, Part F, 3.4.2]
-var ErrInvalidMTU = errors.New("invalid MTU")
 
 // NotificationHandler handles notification or indication.
 //
@@ -805,8 +800,11 @@ func (c *Client) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 	ble.Logger.Debug("client: server requested an MTU change", "tx", txMTU, "rx", rxMTU)
 	c.l2c.SetTxMTU(txMTU)
 
-	rsp := ExchangeMTUResponse(txBuf)
+	// Build the response in its own slice, never in txBuf: the deferred
+	// release can hand txBuf to a concurrent request before the caller
+	// writes this response to the wire.
+	rsp := ExchangeMTUResponse(make([]byte, 3))
 	rsp.SetAttributeOpcode()
 	rsp.SetServerRxMTU(uint16(rxMTU))
-	return rsp[:3]
+	return rsp
 }

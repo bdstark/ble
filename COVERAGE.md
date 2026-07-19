@@ -20,10 +20,10 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **88.0%** (380/432) |
-| Added lines excluding `darwin/` | **98.2%** (380/387) |
+| All added lines | **90.5%** (474/524) |
+| Added lines excluding `darwin/` | **99.0%** (474/479) |
 
-Every changed file is at 100% of its added lines except the four below.
+Every changed file is at 100% of its added lines except the three below.
 The linux backend is pure Go above the socket layer, so all of it —
 including `linux/hci` and `linux/att` — builds and tests on any platform.
 
@@ -53,21 +53,21 @@ theoretical maximum for unit tests is 89.6%.
 - `219` (`Dial` success return): needs a real connection-complete event on
   the HCI's unexported master-conn channel; hardware only.
 
-**`linux/hci/hci.go` — 3 lines.**
-- `162` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
+**`linux/hci/hci.go` — 1 line.**
+- `167` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
   first and cannot get past that without a device; `advDispatcher` itself
-  is fully covered by direct tests.
-- `280-281` (`h.err` non-nil arm inside `send`'s done case): `send` already
-  checked `h.err == nil` on entry without synchronization, so forcing this
-  arm requires an unsynchronized concurrent write to `h.err` that the race
-  detector rightly flags; race-unreachable in tests.
+  is fully covered by direct tests. (The former exclusion for `send`'s
+  `h.err` done-arm is gone: with `h.err` behind `muErr` the arm is
+  race-safely testable and now covered.)
 
 **Not counted at all** (no coverable statements in the diff, or excluded
 by policy): `client.go` and `log.go` at the root (interface methods and a
-package `var` only), `linux/hci/socket/socket.go` (build-tagged
-`linux`; its changes are error-message rewording around raw-HCI ioctls
-that need `CAP_NET_RAW` and an adapter), `examples/`, generated
-`*_gen.go`, and test files themselves.
+package `var` only), `linux/hci/socket/socket.go` (build-tagged `linux`,
+so absent from the darwin-measured profile; its `Close` idempotency and
+close-unblocks-Read behavior are covered by `socket_test.go`, which runs
+on any linux box via socketpair — no adapter needed — e.g.
+`GOOS=linux GOARCH=arm64 go test -c ./linux/hci/socket/` executed on the
+Pi), `examples/`, generated `*_gen.go`, and test files themselves.
 
 ## Timeouts are variables so their branches stay tested
 

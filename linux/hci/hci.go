@@ -126,9 +126,10 @@ type HCI struct {
 	listenerTmo time.Duration
 
 	// err records the fatal transport error, guarded by muErr: sktLoop,
-	// close, and send all touch it from different goroutines. Reads in
-	// gap.go that follow <-h.done are ordered by the channel close (every
-	// sktLoop write precedes it) and stay lock-free.
+	// close, and send all touch it from different goroutines. <-h.done
+	// does NOT make lock-free reads safe: close() is reachable after done
+	// is already closed (e.g. a send() write failure racing shutdown), so
+	// all reads go through Error().
 	muErr sync.Mutex
 	err   error
 	done  chan bool

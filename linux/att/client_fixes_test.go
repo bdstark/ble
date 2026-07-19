@@ -214,3 +214,19 @@ func TestSendReqAbsoluteDeadline(t *testing.T) {
 		t.Fatalf("deadline was extended by unexpected PDUs: took %v", elapsed)
 	}
 }
+
+// TestPrepareWriteSendReqError pins PrepareWrite's sendReq-error arm: an
+// unanswered request must surface ErrSeqProtoTimeout through PrepareWrite.
+func TestPrepareWriteSendReqError(t *testing.T) {
+	old := seqProtoTimeout
+	seqProtoTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { seqProtoTimeout = old })
+
+	f := newOnceConn()
+	c := startClient(t, f)
+	go func() { <-f.writes }() // swallow the request; never respond
+
+	if _, _, _, err := c.PrepareWrite(context.Background(), 3, 0, []byte{0xAB}); !errors.Is(err, ErrSeqProtoTimeout) {
+		t.Fatalf("PrepareWrite = %v, want ErrSeqProtoTimeout", err)
+	}
+}

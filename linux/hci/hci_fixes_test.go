@@ -515,3 +515,21 @@ func TestInitReturnsRecordedError(t *testing.T) {
 		t.Fatal("init wrote no commands")
 	}
 }
+
+// TestHandleCommandCompleteUnknownOpcode pins the not-found branch: a
+// completion for an opcode with no sent entry (e.g. one that arrives after
+// the timeout path already removed it) must error, not touch anything.
+func TestHandleCommandCompleteUnknownOpcode(t *testing.T) {
+	h := &HCI{muSent: &sync.Mutex{}, sent: map[int]*pkt{}, chCmdBufs: make(chan []byte, 16)}
+	if err := h.handleCommandComplete(cmdCompletePkt(0x180C, 0x07)[3:]); err == nil {
+		t.Fatal("unknown-opcode completion returned nil, want error")
+	}
+}
+
+// TestHandleCommandStatusUnknownOpcode is the CommandStatus twin.
+func TestHandleCommandStatusUnknownOpcode(t *testing.T) {
+	h := &HCI{muSent: &sync.Mutex{}, sent: map[int]*pkt{}, chCmdBufs: make(chan []byte, 16)}
+	if err := h.handleCommandStatus(cmdStatusPkt(0x200D, 0x08)[3:]); err == nil {
+		t.Fatal("unknown-opcode status returned nil, want error")
+	}
+}

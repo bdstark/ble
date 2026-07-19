@@ -188,7 +188,7 @@ func (h *HCI) Accept() (ble.Conn, error) {
 	}
 	select {
 	case <-h.done:
-		return nil, h.err
+		return nil, h.Error()
 	case c := <-h.chSlaveConn:
 		return c, nil
 	case <-tmo:
@@ -220,7 +220,7 @@ func (h *HCI) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	case <-tmo:
 		return h.cancelDial()
 	case <-h.done:
-		return nil, h.err
+		return nil, h.Error()
 	case c := <-h.chMasterConn:
 		return gatt.NewClient(c)
 
@@ -248,7 +248,7 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 		case c := <-h.chMasterConn:
 			return gatt.NewClient(c)
 		case <-h.done:
-			return nil, h.err
+			return nil, h.Error()
 		case <-time.After(connCancelTimeout):
 			return nil, fmt.Errorf("hci: connection cancel disallowed but connection never arrived")
 		}
