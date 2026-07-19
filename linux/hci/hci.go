@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-ble/ble"
@@ -51,6 +52,8 @@ func NewHCI(opts ...ble.Option) (*HCI, error) {
 		conns:        make(map[uint16]*Conn),
 		chMasterConn: make(chan *Conn),
 		chSlaveConn:  make(chan *Conn),
+
+		chAdv: make(chan *Advertisement, 64),
 
 		done: make(chan bool),
 	}
@@ -99,6 +102,13 @@ type HCI struct {
 	advHandler ble.AdvHandler
 	adHist     []*Advertisement
 	adLast     int
+
+	// chAdv feeds the single adv dispatcher goroutine. Scanning is lossy by
+	// nature: when the handler can't keep up the report is dropped rather
+	// than blocking sktLoop or spawning a goroutine per report, but every
+	// drop is counted (see AdvDropped).
+	chAdv      chan *Advertisement
+	advDropped atomic.Uint64
 
 	// Host to Controller Data Flow Control Packet-based Data flow control for LE-U [Vol 2, Part E, 4.1.1]
 	// Minimum 27 bytes. 4 bytes of L2CAP Header, and 23 bytes Payload from upper layer (ATT)
@@ -150,6 +160,7 @@ func (h *HCI) Init() error {
 	h.setAllowedCommands(1)
 
 	go h.sktLoop()
+	go h.advDispatcher()
 	if err := h.init(); err != nil {
 		return err
 	}
@@ -458,10 +469,40 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 		default:
 			a = newAdvertisement(e, i)
 		}
-		go h.advHandler(a)
+		// Non-blocking hand-off to the dispatcher. A goroutine per report
+		// (the previous model) churns the scheduler at scan rates, delivers
+		// reports out of order, and leaks goroutines when a handler blocks.
+		select {
+		case h.chAdv <- a:
+		default:
+			h.advDropped.Add(1)
+		}
 	}
 
 	return nil
+}
+
+// advDispatcher delivers advertising reports to the registered handler, one
+// at a time and in arrival order. It runs for the lifetime of the HCI
+// instance and exits when h.done is closed (by sktLoop, on socket close).
+func (h *HCI) advDispatcher() {
+	for {
+		select {
+		case a := <-h.chAdv:
+			if f := h.advHandler; f != nil {
+				f(a)
+			}
+		case <-h.done:
+			return
+		}
+	}
+}
+
+// AdvDropped returns the number of advertising reports dropped because the
+// dispatch queue was full, i.e. the advertisement handler could not keep up
+// with the scan rate.
+func (h *HCI) AdvDropped() uint64 {
+	return h.advDropped.Load()
 }
 
 func (h *HCI) handleCommandComplete(b []byte) error {
