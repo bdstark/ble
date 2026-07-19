@@ -1,12 +1,14 @@
 package hci
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
 	"github.com/go-ble/ble/linux/hci/evt"
 )
@@ -399,4 +401,79 @@ func TestDoubleTeardownPanicFree(t *testing.T) {
 	}
 	waitDisconnected(t, c)
 	waitChInPDUClosed(t, c)
+}
+
+// TestRecombineDisconnectMidReassembly: teardown closing chInPkt while a
+// segmented PDU is mid-reassembly is a clean shutdown (io.EOF), not stream
+// corruption — the wrapper must not log "recombine failed" or re-kill for
+// an ordinary disconnect that happened to land between fragments.
+func TestRecombineDisconnectMidReassembly(t *testing.T) {
+	c := &Conn{
+		chInPkt: make(chan packet, 2),
+		chInPDU: make(chan pdu, 1),
+		chDone:  make(chan struct{}),
+		rxMPS:   23,
+	}
+	// First fragment of a segmented SDU: claims 10 payload bytes, carries 1.
+	c.chInPkt <- mkACLPkt(0x0040, mkpdu(10, cidLEAtt, []byte{0xAA}))
+	close(c.chInPkt)
+	if err := c.recombine(); err != io.EOF {
+		t.Fatalf("recombine mid-reassembly close = %v, want io.EOF", err)
+	}
+}
+
+// TestDialAcceptSurfaceHCIDeath: the <-h.done arms in Dial and Accept must
+// return the recorded fatal transport error via Error(), not nil.
+func TestDialAcceptSurfaceHCIDeath(t *testing.T) {
+	quietLogger(t)
+	skt := newFakeSkt()
+	respondWithStatus(skt, 0x00)
+	h := newTeardownHCI(t, skt)
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := h.Dial(context.Background(), ble.NewAddr("11:22:33:44:55:66"))
+		errc <- err
+	}()
+	// Let the dial write LECreateConnection and park on the select, then
+	// kill the socket: sktLoop exits and h.done closes.
+	for i := 0; len(skt.written()) == 0 && i < 400; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	skt.rd <- nil
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Error("Dial after HCI death returned a nil error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial did not return after HCI death")
+	}
+	if _, err := h.Accept(); err == nil {
+		t.Error("Accept after HCI death returned a nil error")
+	}
+}
+
+// TestRecombineDispatchesSignal covers the recombine → handleSignal route:
+// an unknown signaling code must produce a Command Reject on the wire.
+func TestRecombineDispatchesSignal(t *testing.T) {
+	quietLogger(t)
+	skt := newFakeSkt()
+	respondWithStatus(skt, 0x00)
+	h := newTeardownHCI(t, skt)
+	addConn(h, 0x0040)
+
+	// Signaling PDU: code 0xFF (unknown), id 1, length 0.
+	skt.rd <- aclWirePkt(0x0040, mkpdu(4, cidLESignal, []byte{0xFF, 0x01, 0x00, 0x00}))
+
+	for i := 0; i < 400; i++ {
+		for _, w := range skt.written() {
+			if len(w) > 0 && w[0] == pktTypeACLData {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no ACL response to an unknown signaling code")
 }

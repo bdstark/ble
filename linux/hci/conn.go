@@ -328,7 +328,12 @@ func (c *Conn) recombine() error {
 		p = append(p, pdu(pkt.data())...)
 	}
 	for len(p) < 4+p.dlen() {
-		if pkt, ok = <-c.chInPkt; !ok || (pkt.pbf()&pbfContinuing) == 0 {
+		if pkt, ok = <-c.chInPkt; !ok {
+			// Teardown closed chInPkt mid-reassembly: a disconnect, not a
+			// framing error from the peer. Report the clean-shutdown error
+			// so the recombine wrapper doesn't log corruption and re-kill.
+			return io.EOF
+		} else if (pkt.pbf() & pbfContinuing) == 0 {
 			return io.ErrUnexpectedEOF
 		}
 		p = append(p, pdu(pkt.data())...)

@@ -632,10 +632,14 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			// Abandonment by the caller, not a protocol failure: the peer may
 			// still answer, so the bearer stays usable. Deliberately NOT
 			// poisoned — callers cancel requests during normal shutdown and
-			// reconnect, and the stale-response hazard is bounded here by the
-			// cap-1 rspc buffer plus the drain at the top of sendReq (a late
-			// response can only be consumed between requests, where it is
-			// discarded, never after the next request has been written).
+			// reconnect, where connection teardown follows immediately.
+			// Residual hazard: if the next same-opcode request is written
+			// before the abandoned one's response arrives, that stale
+			// response can be consumed as the new request's answer. The
+			// cap-1 rspc buffer and the pre-request drain only catch
+			// stragglers landing between requests; closing the window
+			// would require holding the transaction slot until the response
+			// or the absolute timeout.
 			return nil, ctx.Err()
 		case <-t.C:
 			// The transaction timed out: per [Vol 3, Part F, 3.3.3] no

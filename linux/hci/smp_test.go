@@ -112,12 +112,21 @@ func TestHandleSMPSecurityRequest(t *testing.T) {
 }
 
 // TestHandleSMPAllOpcodes: every recognized opcode (0x01-0x0E) gets the same
-// well-formed Pairing Failed response.
+// well-formed Pairing Failed response — except Pairing Failed itself, which
+// terminates the procedure and must not be answered [Vol 3, Part H, 3.5.5]
+// (two rejecting stacks would ping-pong), and the informational Keypress
+// notification.
 func TestHandleSMPAllOpcodes(t *testing.T) {
 	for code := byte(pairingRequest); code <= pairingKeypress; code++ {
 		c, skt := smpTestConn()
 		if err := c.handleSMP(smpFrame([]byte{code, 0x00})); err != nil {
 			t.Fatalf("handleSMP(opcode %#02x) = %v, want nil", code, err)
+		}
+		if code == pairingFailed || code == pairingKeypress {
+			if w := skt.written(); len(w) != 0 {
+				t.Fatalf("opcode %#02x got %d responses, want none", code, len(w))
+			}
+			continue
 		}
 		assertPairingFailed(t, skt.written())
 	}

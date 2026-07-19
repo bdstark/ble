@@ -20,10 +20,10 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **90.5%** (474/524) |
-| Added lines excluding `darwin/` | **99.0%** (474/479) |
+| All added lines | **92.1%** (627/681) |
+| Added lines excluding `darwin/` | **98.6%** (627/636) |
 
-Every changed file is at 100% of its added lines except the three below.
+Every changed file is at 100% of its added lines except the four below.
 The linux backend is pure Go above the socket layer, so all of it —
 including `linux/hci` and `linux/att` — builds and tests on any platform.
 
@@ -54,11 +54,17 @@ theoretical maximum for unit tests is 89.6%.
   the HCI's unexported master-conn channel; hardware only.
 
 **`linux/hci/hci.go` — 1 line.**
-- `167` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
+- `173` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
   first and cannot get past that without a device; `advDispatcher` itself
   is fully covered by direct tests. (The former exclusion for `send`'s
   `h.err` done-arm is gone: with `h.err` behind `muErr` the arm is
   race-safely testable and now covered.)
+
+**`linux/hci/conn.go` — 4 lines (temporary).**
+- `375-378` (`ReadRSSI` body): pre-existing code that entered the diff via
+  reformatting only. Deliberately not pinned: ReadRSSI is known-broken
+  (swallows the Send error, returns 0 on failure) and is queued for a
+  signature rework to `(int, error)`; tests land with that change.
 
 **Not counted at all** (no coverable statements in the diff, or excluded
 by policy): `client.go` and `log.go` at the root (interface methods and a

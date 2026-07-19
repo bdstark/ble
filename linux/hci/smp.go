@@ -65,6 +65,10 @@ func (c *Conn) handleSMP(p pdu) error {
 	case pairingConfirm:
 	case pairingRandom:
 	case pairingFailed:
+		// Pairing Failed terminates the procedure and must not be answered
+		// [Vol 3, Part H, 3.5.5] — replying would make two rejecting stacks
+		// ping-pong Pairing Failed at each other.
+		return nil
 	case encryptionInformation:
 	case masterIdentification:
 	case identiInformation:
@@ -74,6 +78,8 @@ func (c *Conn) handleSMP(p pdu) error {
 	case pairingPublicKey:
 	case pairingDHKeyCheck:
 	case pairingKeypress:
+		// Keypress notifications are informational; nothing to reject.
+		return nil
 	default:
 		// If a packet is received with a reserved Code it shall be ignored. [Vol 3, Part H, 3.3]
 		return nil
