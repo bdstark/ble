@@ -257,6 +257,12 @@ func (h *HCI) Send(c Command, r CommandRP) error {
 	return nil
 }
 
+// cmdTimeout bounds both waits in the command path: acquiring a command
+// buffer and waiting for the controller's completion event. Commands
+// normally complete in milliseconds; hitting this means the controller
+// has stopped responding and the HCI instance is closed.
+var cmdTimeout = 10 * time.Second
+
 func (h *HCI) send(c Command) ([]byte, error) {
 	if h.err != nil {
 		return nil, h.err
@@ -274,7 +280,7 @@ func (h *HCI) send(c Command) ([]byte, error) {
 			return nil, h.err
 		}
 		return nil, ErrClosed
-	case <-time.After(10 * time.Second):
+	case <-time.After(cmdTimeout):
 		err := fmt.Errorf("no command buffer available (controller not completing commands): %w", ErrCommandTimeout)
 		h.close(err)
 		return nil, err
@@ -302,7 +308,7 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	// emergency timeout to prevent calls from locking up if the HCI
 	// interface doesn't respond.  Responsed here should normally be fast
 	// a timeout indicates a major problem with HCI.
-	timeout := time.NewTimer(10 * time.Second)
+	timeout := time.NewTimer(cmdTimeout)
 	select {
 	case <-timeout.C:
 		err = fmt.Errorf("no response to command, hci connection failed: %w", ErrCommandTimeout)

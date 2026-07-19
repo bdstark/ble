@@ -227,6 +227,11 @@ func (h *HCI) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	}
 }
 
+// connCancelTimeout bounds the wait for the connection-complete event after
+// a connection cancel is rejected with ErrDisallowed (meaning the connection
+// already went up): the event should already be in flight.
+var connCancelTimeout = 5 * time.Second
+
 // cancelDial cancels the Dialing
 func (h *HCI) cancelDial() (ble.Client, error) {
 	err := h.Send(&h.params.connCancel, nil)
@@ -244,7 +249,7 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 			return gatt.NewClient(c)
 		case <-h.done:
 			return nil, h.err
-		case <-time.After(5 * time.Second):
+		case <-time.After(connCancelTimeout):
 			return nil, fmt.Errorf("hci: connection cancel disallowed but connection never arrived")
 		}
 	}
