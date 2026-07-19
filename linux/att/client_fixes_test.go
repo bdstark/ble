@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // waitCond polls cond until it holds or 2s elapse.

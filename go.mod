@@ -1,4 +1,4 @@
-module github.com/go-ble/ble
+module github.com/bdstark/ble
 
 go 1.21
 

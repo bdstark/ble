@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // TestCommandRejectRoundTrip pins the Command Reject wire format [Vol 3,

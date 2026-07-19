@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/att"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/att"
 )
 
 // serveSlow answers Write Requests immediately but delays each Read Response

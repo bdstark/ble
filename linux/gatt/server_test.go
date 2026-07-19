@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // defaultHanderFunc must return once the notifier is unsubscribed (its

@@ -8,9 +8,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/adv"
-	"github.com/go-ble/ble/linux/gatt"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/adv"
+	"github.com/bdstark/ble/linux/gatt"
 )
 
 // Addr ...

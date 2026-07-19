@@ -12,7 +12,7 @@ statements and are executed by `go test` — is the tracked metric, measured
 with [tools/diffcover.py](tools/diffcover.py):
 
 ```sh
-go test -count=1 -coverprofile=/tmp/cover.out -coverpkg=./...,github.com/go-ble/ble/... ./...
+go test -count=1 -coverprofile=/tmp/cover.out -coverpkg=./...,github.com/bdstark/ble/... ./...
 python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 ```
 

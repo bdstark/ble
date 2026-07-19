@@ -8,7 +8,7 @@ statements are covered, and lists uncovered added lines.
 import subprocess, sys, re, collections
 
 repo, rng, cover = sys.argv[1], sys.argv[2], sys.argv[3]
-modprefix = sys.argv[4] if len(sys.argv) > 4 else "github.com/go-ble/ble"
+modprefix = sys.argv[4] if len(sys.argv) > 4 else "github.com/bdstark/ble"
 
 EXCLUDE = ("examples/", "_test.go", "tools/codegen")
 

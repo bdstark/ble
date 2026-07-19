@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/att"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/att"
 )
 
 // fakeConn is a minimal ble.Conn: Read delivers PDUs pushed into in, Write

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // respondWith queues one canned response for the next request written to f.

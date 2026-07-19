@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/hci/cmd"
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/hci/cmd"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // The darwin backend drives CoreBluetooth through cbgo; the HCI-level knobs

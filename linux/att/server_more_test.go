@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // rxMTUConn overrides the fixture's RxMTU so NewServer's validation can be

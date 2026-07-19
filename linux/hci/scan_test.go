@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // ---------------------------------------------------------------------------

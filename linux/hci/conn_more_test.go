@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // mkpdu builds an L2CAP pdu with the given declared payload length, CID, and

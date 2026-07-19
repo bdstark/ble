@@ -6,10 +6,10 @@ import (
 
 	"fmt"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/att"
-	"github.com/go-ble/ble/linux/gatt"
-	"github.com/go-ble/ble/linux/hci"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/att"
+	"github.com/bdstark/ble/linux/gatt"
+	"github.com/bdstark/ble/linux/hci"
 )
 
 // NewDevice returns the default HCI device.

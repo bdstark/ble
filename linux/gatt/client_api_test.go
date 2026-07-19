@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux/att"
+	"github.com/bdstark/ble"
+	"github.com/bdstark/ble/linux/att"
 )
 
 // serveATT answers each request PDU the client writes with respond's reply

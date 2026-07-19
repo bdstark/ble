@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // fakeConn is a minimal ble.Conn whose Read delivers pre-queued PDUs.

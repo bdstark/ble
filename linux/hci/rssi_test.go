@@ -9,8 +9,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/go-ble/ble/linux/hci/cmd"
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/cmd"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // readRSSICompletePkt builds a full HCI CommandComplete event packet for the

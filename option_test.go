@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble/linux/hci/cmd"
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/cmd"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // fakeOptions is a minimal DeviceOption implementation that records which

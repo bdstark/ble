@@ -3,7 +3,7 @@ package hci
 import (
 	"testing"
 
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // advReportFixture is a raw LE Advertising Report event payload with one

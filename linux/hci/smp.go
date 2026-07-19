@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // logDebugEnabled gates per-packet debug logging. The hex dumps behind it

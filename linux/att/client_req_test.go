@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // debugLogging toggles the level of the process-wide test logger. It is an

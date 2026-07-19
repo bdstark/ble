@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/go-ble/ble/linux/hci/evt"
+	"github.com/bdstark/ble/linux/hci/evt"
 )
 
 // smpFrame wraps an SMP command in an L2CAP basic frame on the SMP channel,

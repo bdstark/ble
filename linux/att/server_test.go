@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble"
+	"github.com/bdstark/ble"
 )
 
 // TestServerLoop drives requests through Server.Loop: a spurious

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-ble/ble/linux/hci/cmd"
+	"github.com/bdstark/ble/linux/hci/cmd"
 )
 
 // setCmdTimeout lowers cmdTimeout for one test and restores it afterwards.
