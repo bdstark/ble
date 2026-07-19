@@ -502,9 +502,7 @@ func (h *HCI) cleanupConns() {
 		// NumberOfCompletedPackets event will ever return them, and a
 		// writer mid-writePDU must not leak buffers from the shared
 		// pool (hence the pool lock).
-		c.txBuffer.LockPool()
-		c.txBuffer.PutAll()
-		c.txBuffer.UnlockPool()
+		c.txBuffer.ReclaimAll()
 	}
 }
 
@@ -857,9 +855,7 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 	// must be done with the pool locked to avoid race conditions where
 	// writePDU is in progress and does a Get from the pool after this completes,
 	// leaking a buffer from the main pool.
-	c.txBuffer.LockPool()
-	c.txBuffer.PutAll()
-	c.txBuffer.UnlockPool()
+	c.txBuffer.ReclaimAll()
 	if h.disconnectedHandler != nil {
 		h.disconnectedHandler(e)
 	}

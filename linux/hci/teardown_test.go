@@ -183,7 +183,7 @@ func TestHandleACLFullChannelDropsAndKills(t *testing.T) {
 		chInPkt:  make(chan packet),
 		chInPDU:  make(chan pdu),
 		chDone:   make(chan struct{}),
-		txBuffer: NewClient(h.pool),
+		txBuffer: newTxCredits(h.pool),
 	}
 	h.muConns.Lock()
 	h.conns[0x0040] = c

@@ -18,7 +18,7 @@ func TestSentinelErrorChains(t *testing.T) {
 func TestGetTimeoutSentinels(t *testing.T) {
 	// A pool with a single buffer that is never returned: both GetTimeout
 	// failure modes must yield errors.Is-able sentinels.
-	c := NewClient(NewPool(4, 1))
+	c := newTxCredits(NewPool(4, 1))
 	c.Get() // drain the only buffer
 
 	done := make(chan struct{})

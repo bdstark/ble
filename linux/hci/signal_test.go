@@ -70,7 +70,7 @@ func TestHandleSignalMTUExceededSendsReject(t *testing.T) {
 	c := &Conn{
 		hci:      &HCI{skt: skt},
 		sigRxMTU: 23,
-		txBuffer: NewClient(NewPool(64, 1)),
+		txBuffer: newTxCredits(NewPool(64, 1)),
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 	}

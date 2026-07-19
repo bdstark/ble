@@ -20,7 +20,7 @@ func smpTestConn() (*Conn, *fakeSkt) {
 	skt := newFakeSkt()
 	c := &Conn{
 		hci:      &HCI{skt: skt},
-		txBuffer: NewClient(NewPool(64, 1)),
+		txBuffer: newTxCredits(NewPool(64, 1)),
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 	}

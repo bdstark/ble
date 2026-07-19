@@ -18,7 +18,7 @@ import (
 // (the NumberOfCompletedPackets handler in real use) before the
 // timeout fires.
 func TestGetTimeoutAcquireAfterWait(t *testing.T) {
-	c := NewClient(NewPool(4, 1))
+	c := newTxCredits(NewPool(4, 1))
 	c.Get() // drain the pool; the buffer is now on c.sent
 
 	release := make(chan struct{})
@@ -53,7 +53,7 @@ func TestGetTimeoutAcquireAfterWait(t *testing.T) {
 // huge timeout must not matter — the acquire returns at once and the
 // deferred Stop releases the timer.
 func TestGetTimeoutImmediateWithLongTimeout(t *testing.T) {
-	c := NewClient(NewPool(4, 1))
+	c := newTxCredits(NewPool(4, 1))
 	start := time.Now()
 	b, err := c.GetTimeout(make(chan struct{}), time.Hour)
 	if err != nil || b == nil {
@@ -67,7 +67,7 @@ func TestGetTimeoutImmediateWithLongTimeout(t *testing.T) {
 // TestGetTimeoutExpiresPromptly: an empty pool with a tiny timeout
 // must return ErrCreditTimeout via the timer channel, not hang.
 func TestGetTimeoutExpiresPromptly(t *testing.T) {
-	c := NewClient(NewPool(4, 1))
+	c := newTxCredits(NewPool(4, 1))
 	c.Get() // drain the pool
 
 	start := time.Now()

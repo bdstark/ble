@@ -77,7 +77,7 @@ type Conn struct {
 
 	// Host to Controller Data Flow Control pkt-based Data flow control for LE-U [Vol 2, Part E, 4.1.1]
 	// chSentBufs tracks the HCI buffer occupied by this connection.
-	txBuffer *Client
+	txBuffer *txCredits
 
 	// sigID is used to match responses with signaling requests.
 	// The requesting device sets this field and the responding device uses the
@@ -106,7 +106,7 @@ func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 		chInPkt: make(chan packet, 16),
 		chInPDU: make(chan pdu, 16),
 
-		txBuffer: NewClient(h.pool),
+		txBuffer: newTxCredits(h.pool),
 
 		chDone: make(chan struct{}),
 	}
@@ -245,8 +245,8 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 	// All L2CAP fragments associated with an L2CAP PDU shall be processed for
 	// transmission by the Controller before any other L2CAP PDU for the same
 	// logical transport shall be processed.
-	c.txBuffer.LockPool()
-	defer c.txBuffer.UnlockPool()
+	c.txBuffer.lock()
+	defer c.txBuffer.unlock()
 
 	// Fail immediately if the connection is already closed
 	// Check this with the pool locked to avoid race conditions

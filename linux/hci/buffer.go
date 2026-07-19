@@ -25,29 +25,29 @@ func NewPool(sz int, cnt int) *Pool {
 	return &Pool{sz: sz, cnt: cnt, ch: ch}
 }
 
-// Client ...
-type Client struct {
+// txCredits is a connection's view of the shared ACL TX buffer pool: it
+// hands out flow-controlled buffers and tracks the ones in flight so they
+// can be reclaimed when the controller acknowledges them (or the connection
+// tears down). It is not a BLE client — despite the historical name it
+// replaces, it has nothing to do with att/gatt/ble.Client.
+type txCredits struct {
 	p    *Pool
 	sent chan *bytes.Buffer
 }
 
-// NewClient ...
-func NewClient(p *Pool) *Client {
-	return &Client{p: p, sent: make(chan *bytes.Buffer, p.cnt)}
+// newTxCredits returns a credit tracker over the shared pool p.
+func newTxCredits(p *Pool) *txCredits {
+	return &txCredits{p: p, sent: make(chan *bytes.Buffer, p.cnt)}
 }
 
-// LockPool ...
-func (c *Client) LockPool() {
-	c.p.Lock()
-}
-
-// UnlockPool ...
-func (c *Client) UnlockPool() {
-	c.p.Unlock()
-}
+// lock/unlock guard the shared pool for a multi-step critical section
+// (writePDU holds it across a whole fragment train). Single-step reclaim
+// should use ReclaimAll, which locks internally.
+func (c *txCredits) lock()   { c.p.Lock() }
+func (c *txCredits) unlock() { c.p.Unlock() }
 
 // Get returns a buffer from the shared buffer pool.
-func (c *Client) Get() *bytes.Buffer {
+func (c *txCredits) Get() *bytes.Buffer {
 	b := <-c.p.ch
 	b.Reset()
 	c.sent <- b
@@ -60,7 +60,7 @@ func (c *Client) Get() *bytes.Buffer {
 // controller; on a connection that died without a processed
 // disconnect event those never arrive, and a bare Get would block its
 // caller forever.
-func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffer, error) {
+func (c *txCredits) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffer, error) {
 	// time.NewTimer + Stop instead of time.After: a buffer is usually
 	// available immediately, and time.After would leave a live timer
 	// (and its channel) around for the full duration on every ACL TX
@@ -80,7 +80,7 @@ func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffe
 }
 
 // Put puts the oldest sent buffer back to the shared pool.
-func (c *Client) Put() {
+func (c *txCredits) Put() {
 	select {
 	case b := <-c.sent:
 		c.p.ch <- b
@@ -88,8 +88,12 @@ func (c *Client) Put() {
 	}
 }
 
-// PutAll puts all the sent buffers back to the shared pool.
-func (c *Client) PutAll() {
+// ReclaimAll returns every in-flight buffer to the shared pool, locking the
+// pool internally. Used by the teardown paths, which have no other reason to
+// hold the pool lock.
+func (c *txCredits) ReclaimAll() {
+	c.p.Lock()
+	defer c.p.Unlock()
 	for {
 		select {
 		case b := <-c.sent:

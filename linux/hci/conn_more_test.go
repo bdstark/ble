@@ -75,7 +75,7 @@ func TestWriteExceedsMTU(t *testing.T) {
 // with ErrClosed, before touching the buffer pool.
 func TestWritePDUClosedFastPath(t *testing.T) {
 	c := &Conn{
-		txBuffer: NewClient(NewPool(32, 1)),
+		txBuffer: newTxCredits(NewPool(32, 1)),
 		chDone:   closedDone(),
 	}
 	if _, err := c.writePDU([]byte{1, 2, 3}); err != ErrClosed {
@@ -92,7 +92,7 @@ func TestWritePDUCreditTimeout(t *testing.T) {
 	defer func() { ACLWriteTimeout = old }()
 
 	c := &Conn{
-		txBuffer: NewClient(NewPool(32, 1)),
+		txBuffer: newTxCredits(NewPool(32, 1)),
 		chDone:   make(chan struct{}),
 	}
 	c.txBuffer.Get() // exhaust the pool; credits never return
@@ -109,7 +109,7 @@ func TestWriteFragmented(t *testing.T) {
 	skt := newFakeSkt()
 	c := &Conn{
 		hci:      &HCI{skt: skt},
-		txBuffer: NewClient(NewPool(9, 2)), // fragment payload capacity: 9-1-4 = 4 bytes
+		txBuffer: newTxCredits(NewPool(9, 2)), // fragment payload capacity: 9-1-4 = 4 bytes
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 		txMTU:    23,
@@ -149,7 +149,7 @@ func TestWritePDUClosedAtFlush(t *testing.T) {
 		done := make(chan struct{})
 		c := &Conn{
 			hci:      &HCI{skt: skt},
-			txBuffer: NewClient(NewPool(9, 1)), // one credit: 4-byte fragments
+			txBuffer: newTxCredits(NewPool(9, 1)), // one credit: 4-byte fragments
 			chDone:   done,
 			param:    make(evt.LEConnectionComplete, 19),
 		}
@@ -177,7 +177,7 @@ func TestWritePDUClosedAtFlush(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGetTimeoutSuccess(t *testing.T) {
-	c := NewClient(NewPool(4, 1))
+	c := newTxCredits(NewPool(4, 1))
 	b, err := c.GetTimeout(make(chan struct{}), time.Second)
 	if err != nil || b == nil {
 		t.Fatalf("GetTimeout with credit available = (%v, %v), want a buffer", b, err)
@@ -258,7 +258,7 @@ func TestHandleSignalMTUExceeded(t *testing.T) {
 	debugLogger(t)
 	c := &Conn{
 		sigRxMTU: 1, // anything is oversized
-		txBuffer: NewClient(NewPool(32, 1)),
+		txBuffer: newTxCredits(NewPool(32, 1)),
 		chDone:   closedDone(), // sendResponse's writePDU fails with ErrClosed
 	}
 	// dlen 4 > sigRxMTU 1; payload holds code+id so sigCmd.id() works.
@@ -278,7 +278,7 @@ func TestHandleSignalDisconnectRequest(t *testing.T) {
 	c := &Conn{
 		hci:      &HCI{skt: skt},
 		sigRxMTU: 512,
-		txBuffer: NewClient(NewPool(64, 1)),
+		txBuffer: newTxCredits(NewPool(64, 1)),
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 	}
@@ -300,7 +300,7 @@ func TestHandleSignalDisconnectRequest(t *testing.T) {
 func TestHandleSMP(t *testing.T) {
 	debugLogger(t)
 	c := &Conn{
-		txBuffer: NewClient(NewPool(32, 1)),
+		txBuffer: newTxCredits(NewPool(32, 1)),
 		chDone:   closedDone(),
 	}
 	req := smpFrame([]byte{pairingRequest, 0x04, 0x00, 0x01, 0x10, 0x00, 0x00})
@@ -327,7 +327,7 @@ func TestHandleSMPSendSuccess(t *testing.T) {
 	skt := newFakeSkt()
 	c := &Conn{
 		hci:      &HCI{skt: skt},
-		txBuffer: NewClient(NewPool(64, 1)),
+		txBuffer: newTxCredits(NewPool(64, 1)),
 		chDone:   make(chan struct{}),
 		param:    make(evt.LEConnectionComplete, 19),
 	}
