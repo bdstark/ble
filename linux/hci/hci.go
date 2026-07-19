@@ -125,8 +125,13 @@ type HCI struct {
 	dialerTmo   time.Duration
 	listenerTmo time.Duration
 
-	err  error
-	done chan bool
+	// err records the fatal transport error, guarded by muErr: sktLoop,
+	// close, and send all touch it from different goroutines. Reads in
+	// gap.go that follow <-h.done are ordered by the channel close (every
+	// sktLoop write precedes it) and stay lock-free.
+	muErr sync.Mutex
+	err   error
+	done  chan bool
 }
 
 // Init ...
@@ -185,7 +190,27 @@ func (h *HCI) Done() <-chan bool {
 
 // Error ...
 func (h *HCI) Error() error {
+	h.muErr.Lock()
+	defer h.muErr.Unlock()
 	return h.err
+}
+
+// setErr records err as the fatal HCI error, replacing any previous one.
+func (h *HCI) setErr(err error) {
+	h.muErr.Lock()
+	h.err = err
+	h.muErr.Unlock()
+}
+
+// setErrIfAbsent records err only when no fatal error is recorded yet, so
+// the socket-teardown error that follows a close(err) cannot clobber the
+// root cause.
+func (h *HCI) setErrIfAbsent(err error) {
+	h.muErr.Lock()
+	if h.err == nil {
+		h.err = err
+	}
+	h.muErr.Unlock()
 }
 
 // Option sets the options specified.
@@ -236,7 +261,7 @@ func (h *HCI) init() error {
 	WriteLEHostSupportRP := cmd.WriteLEHostSupportRP{}
 	h.Send(&cmd.WriteLEHostSupport{LESupportedHost: 1, SimultaneousLEHost: 0}, &WriteLEHostSupportRP)
 
-	return h.err
+	return h.Error()
 }
 
 // Send ...
@@ -264,10 +289,14 @@ func (h *HCI) Send(c Command, r CommandRP) error {
 var cmdTimeout = 10 * time.Second
 
 func (h *HCI) send(c Command) ([]byte, error) {
-	if h.err != nil {
-		return nil, h.err
+	if err := h.Error(); err != nil {
+		return nil, err
 	}
-	p := &pkt{c, make(chan []byte)}
+	// done is buffered so a completion event that races with our
+	// cmdTimeout below (the handler finds this entry in h.sent after we
+	// stopped listening) can be parked in the buffer instead of blocking
+	// sktLoop forever.
+	p := &pkt{c, make(chan []byte, 1)}
 	// Bounded: command buffers are returned by CommandComplete/Status
 	// events, which a wedged controller stops sending — a bare receive
 	// here parks the caller (including CancelConnection, the usual
@@ -276,8 +305,8 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	select {
 	case b = <-h.chCmdBufs:
 	case <-h.done:
-		if h.err != nil {
-			return nil, h.err
+		if err := h.Error(); err != nil {
+			return nil, err
 		}
 		return nil, ErrClosed
 	case <-time.After(cmdTimeout):
@@ -290,16 +319,27 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	b[2] = byte(c.OpCode() >> 8)
 	b[3] = byte(c.Len())
 	if err := c.Marshal(b[4:]); err != nil {
-		h.close(fmt.Errorf("hci: failed to marshal cmd"))
+		err = fmt.Errorf("hci: failed to marshal cmd: %w", err)
+		h.close(err)
+		return nil, err
 	}
 
 	h.muSent.Lock()
 	h.sent[c.OpCode()] = p
 	h.muSent.Unlock()
-	if n, err := h.skt.Write(b[:4+c.Len()]); err != nil {
-		h.close(fmt.Errorf("hci: failed to send cmd"))
-	} else if n != 4+c.Len() {
-		h.close(fmt.Errorf("hci: failed to send whole cmd pkt to hci socket"))
+	if n, err := h.skt.Write(b[:4+c.Len()]); err != nil || n != 4+c.Len() {
+		if err != nil {
+			err = fmt.Errorf("hci: failed to send cmd: %w", err)
+		} else {
+			err = fmt.Errorf("hci: failed to send whole cmd pkt to hci socket")
+		}
+		h.close(err)
+		// The command never (fully) went out, so nothing will complete
+		// it — fail now instead of parking on p.done for cmdTimeout.
+		h.muSent.Lock()
+		delete(h.sent, c.OpCode())
+		h.muSent.Unlock()
+		return nil, err
 	}
 
 	var ret []byte
@@ -314,7 +354,7 @@ func (h *HCI) send(c Command) ([]byte, error) {
 		err = fmt.Errorf("no response to command, hci connection failed: %w", ErrCommandTimeout)
 		ret = nil
 	case <-h.done:
-		err = h.err
+		err = h.Error()
 		ret = nil
 	case b := <-p.done:
 		err = nil
@@ -376,10 +416,13 @@ func (h *HCI) sktLoop() {
 	for {
 		n, err := h.skt.Read(b)
 		if n == 0 || err != nil {
+			// If-absent: a close(err) tears the socket down and lands
+			// here; the resulting read error must not clobber the
+			// recorded root cause.
 			if err == io.EOF {
-				h.err = err //callers depend on detecting io.EOF, don't wrap it.
+				h.setErrIfAbsent(err) // callers depend on detecting io.EOF, don't wrap it.
 			} else {
-				h.err = fmt.Errorf("skt: %s", err)
+				h.setErrIfAbsent(fmt.Errorf("skt: %w", err))
 			}
 			return
 		}
@@ -410,7 +453,7 @@ func (h *HCI) sktLoop() {
 }
 
 func (h *HCI) close(err error) error {
-	h.err = err
+	h.setErr(err)
 	if h.skt != nil {
 		return h.skt.Close()
 	}
@@ -459,11 +502,13 @@ func (h *HCI) handleEvt(b []byte) error {
 			return f(b[2:])
 		}
 	}
-	if plen != len(b[2:]) {
-		h.err = fmt.Errorf("invalid event packet: % X", b)
-	}
 	if f := h.evth[code]; f != nil {
-		h.err = f(b[2:])
+		// A handler error concerns one event, not the transport: log it
+		// instead of storing it in h.err, where it would fail every
+		// subsequent Send until overwritten (and race with send's read).
+		if err := f(b[2:]); err != nil {
+			ble.Logger.Error("hci: event handler failed", "code", fmt.Sprintf("%#02x", code), "err", err)
+		}
 		return nil
 	}
 	if code == 0xff { // Ignore vendor events
@@ -583,7 +628,14 @@ func (h *HCI) handleCommandComplete(b []byte) error {
 	// evtPool. Command completions are cold path; the copy is cheap.
 	ret := make([]byte, len(e.ReturnParameters()))
 	copy(ret, e.ReturnParameters())
-	p.done <- ret
+	// Non-blocking: done holds exactly the one expected reply. If send()
+	// timed out just before this event arrived (its entry still in h.sent),
+	// or a duplicate completion shows up for the same opcode, drop the
+	// reply instead of wedging sktLoop on a channel nobody reads.
+	select {
+	case p.done <- ret:
+	default:
+	}
 	return nil
 }
 
@@ -597,14 +649,29 @@ func (h *HCI) handleCommandStatus(b []byte) error {
 	if !found {
 		return fmt.Errorf("can't find the cmd for CommandStatusEP: % X", e)
 	}
-	p.done <- []byte{e.Status()}
+	// Non-blocking for the same reason as in handleCommandComplete.
+	select {
+	case p.done <- []byte{e.Status()}:
+	default:
+	}
 	return nil
 }
 
 func (h *HCI) handleLEConnectionComplete(b []byte) error {
 	e := evt.LEConnectionComplete(b)
-	if e.Role() == roleMaster && ErrCommand(e.Status()) == ErrConnID {
-		// The connection was canceled successfully.
+	if e.Role() == roleMaster && e.Status() != 0x00 {
+		if ErrCommand(e.Status()) == ErrConnID {
+			// The connection was canceled successfully.
+			return nil
+		}
+		// The connect failed (e.g. 0x3E connection failed to be
+		// established). Don't create or register a Conn: the handle is
+		// junk, no disconnect event will ever arrive for it, and the
+		// Conn (with its recombine goroutine and buffers) would sit in
+		// h.conns forever. chMasterConn deliberately gets nothing:
+		// gap.go's Dial keeps waiting and surfaces the failure through
+		// its context/dialerTmo timeout rather than failing fast.
+		ble.Logger.Warn("hci: connection failed to establish", "status", ErrCommand(e.Status()).Error())
 		return nil
 	}
 	c := newConn(h, e)
@@ -612,13 +679,11 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 	h.conns[e.ConnectionHandle()] = c
 	h.muConns.Unlock()
 	if e.Role() == roleMaster {
-		if e.Status() == 0x00 {
-			select {
-			case h.chMasterConn <- c:
-			default:
-				go c.Close()
-			}
-			return nil
+		// Status is 0x00 here (failures returned above).
+		select {
+		case h.chMasterConn <- c:
+		default:
+			go c.Close()
 		}
 		return nil
 	}
