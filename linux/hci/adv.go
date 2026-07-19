@@ -44,11 +44,16 @@ func (a *Advertisement) setScanResponse(sr *Advertisement) {
 }
 
 // packets returns the combined advertising packet and scan response (if presents)
+// The parse is cached: field accessors (LocalName, Services, ...) are typically
+// called several times per advertisement, and re-parsing allocates a fresh
+// adv.Packet each time. Handlers run on the single adv dispatcher goroutine and
+// paired AD+SR advertisements are built fresh rather than mutated in place
+// (see handleLEAdvertisingReport), so the lazy write to a.p is race-free.
 func (a *Advertisement) packets() *adv.Packet {
-	if a.p != nil {
-		return a.p
+	if a.p == nil {
+		a.p = adv.NewRawPacket(a.Data(), a.ScanResponse())
 	}
-	return adv.NewRawPacket(a.Data(), a.ScanResponse())
+	return a.p
 }
 
 // LocalName returns the LocalName of the remote peripheral.

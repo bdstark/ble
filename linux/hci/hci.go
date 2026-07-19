@@ -439,9 +439,15 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 				if h.adHist[idx] == nil {
 					break
 				}
-				if h.adHist[idx].Addr().String() == sr.Addr().String() {
-					h.adHist[idx].setScanResponse(sr)
-					a = h.adHist[idx]
+				if h.adHist[idx].e.Address(h.adHist[idx].i) == sr.e.Address(sr.i) {
+					// Pair AD+SR in a fresh Advertisement instead of mutating
+					// the stored entry: the stored one may still be in the
+					// handler's hands, and setScanResponse would race with its
+					// field accessors and packet cache. adHist entries stay
+					// immutable after creation. Comparing raw addresses also
+					// avoids two string allocations per scanned history entry.
+					a = newAdvertisement(h.adHist[idx].e, h.adHist[idx].i)
+					a.setScanResponse(sr)
 					break
 				}
 			}
