@@ -322,6 +322,33 @@
                                 }
                         ],
                         "DefaultUnmarshaller": true
+                },
+                {
+                        "Name": "LE Data Length Change",
+                        "Spec": "Vol 2, Part E, 7.7.65.7",
+                        "Code": "0x3E",
+                        "SubCode": "0x07",
+                        "Param": [
+                                {
+                                        "Subevent Code": "uint8"
+                                },
+                                {
+                                        "Connection Handle": "uint16"
+                                },
+                                {
+                                        "Max Tx Octets": "uint16"
+                                },
+                                {
+                                        "Max Tx Time": "uint16"
+                                },
+                                {
+                                        "Max Rx Octets": "uint16"
+                                },
+                                {
+                                        "Max Rx Time": "uint16"
+                                }
+                        ],
+                        "DefaultUnmarshaller": true
                 }
         ]
 }

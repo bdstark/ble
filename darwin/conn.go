@@ -174,6 +174,14 @@ func (c *conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
 	return fmt.Errorf("darwin: connection parameter update: %w", ble.ErrNotImplemented)
 }
 
+// SetDataLength is not supported on the CoreBluetooth backend: macOS manages LE
+// data length itself and exposes no host-side control. It returns a wrapped
+// ble.ErrNotImplemented so the ble.Conn interface stays satisfied and callers
+// can detect the unsupported case with errors.Is.
+func (c *conn) SetDataLength(ctx context.Context, txOctets, txTime uint16) error {
+	return fmt.Errorf("darwin: set data length: %w", ble.ErrNotImplemented)
+}
+
 // processChrRead handles an incoming read response.  CoreBluetooth does not
 // distinguish explicit reads from unsolicited notifications.  This function
 // identifies which type the incoming message is.

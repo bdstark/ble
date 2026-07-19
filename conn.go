@@ -13,6 +13,39 @@ import (
 // range the Bluetooth spec permits, or the fields are mutually inconsistent.
 var ErrInvalidConnParams = errors.New("invalid connection parameters")
 
+// ErrInvalidDataLength is returned by ValidateDataLength (and, wrapped, by
+// Conn.SetDataLength) when a requested LE data-length parameter falls outside
+// the range the Bluetooth spec permits.
+var ErrInvalidDataLength = errors.New("invalid data length parameters")
+
+// LE Data Length Extension permitted ranges for the host's preferred maximum
+// transmission [Vol 6, Part B, 4.5.10]. TxOctets is a link-layer payload size
+// in octets; TxTime is the corresponding air time in microseconds. The
+// controller clamps the request to what it and the peer support, then reports
+// the negotiated maximums in an LE Data Length Change event.
+const (
+	DataLengthMinTxOctets = 27    // minimum supported PDU payload
+	DataLengthMaxTxOctets = 251   // maximum supported PDU payload
+	DataLengthMinTxTime   = 328   // air time for a 27-octet PDU (µs)
+	DataLengthMaxTxTime   = 17040 // air time for a 251-octet coded-PHY PDU (µs)
+)
+
+// ValidateDataLength reports whether txOctets and txTime are within the ranges
+// [Vol 6, Part B, 4.5.10] accepts for LE Set Data Length: TxOctets in
+// [27, 251], TxTime in [328, 17040] µs. An out-of-range field returns
+// ErrInvalidDataLength (wrapped, with detail); nil means the pair is valid.
+// Pass DataLengthMaxTxOctets / DataLengthMaxTxTime (251 / 17040) to request the
+// controller's ceiling.
+func ValidateDataLength(txOctets, txTime uint16) error {
+	switch {
+	case txOctets < DataLengthMinTxOctets || txOctets > DataLengthMaxTxOctets:
+		return fmt.Errorf("tx octets %d out of range [%d, %d]: %w", txOctets, DataLengthMinTxOctets, DataLengthMaxTxOctets, ErrInvalidDataLength)
+	case txTime < DataLengthMinTxTime || txTime > DataLengthMaxTxTime:
+		return fmt.Errorf("tx time %d out of range [%d, %d]: %w", txTime, DataLengthMinTxTime, DataLengthMaxTxTime, ErrInvalidDataLength)
+	}
+	return nil
+}
+
 // Bluetooth LE connection-parameter units and permitted ranges
 // [Vol 6, Part B, 4.5]. Connection interval is expressed in 1.25 ms steps,
 // supervision timeout in 10 ms steps.
@@ -130,6 +163,24 @@ type Conn interface {
 	// CoreBluetooth, which manages parameters itself) return a wrapped
 	// ErrNotImplemented.
 	UpdateParams(ctx context.Context, p ConnParams) error
+
+	// SetDataLength requests LE Data Length Extension on a live central link:
+	// it asks the controller to use up to txOctets-octet link-layer payloads
+	// (and txTime µs of air time) for this connection, cutting the packet
+	// count of large GATT operations and thus radio airtime. txOctets and
+	// txTime are validated by ValidateDataLength; an out-of-range value returns
+	// ErrInvalidDataLength (wrapped) without touching the controller. Pass
+	// DataLengthMaxTxOctets / DataLengthMaxTxTime (251 / 17040) for "the
+	// controller's maximum".
+	//
+	// Unlike UpdateParams, this returns as soon as the controller accepts or
+	// rejects the command (a Command Complete with a status): the actual
+	// negotiated length arrives asynchronously — if at all — as an LE Data
+	// Length Change event and may also be driven by the peer, so it is not
+	// correlated 1:1 with this call. A non-zero command status is returned as
+	// an error. Backends that manage data length themselves (e.g.
+	// CoreBluetooth) return a wrapped ErrNotImplemented.
+	SetDataLength(ctx context.Context, txOctets, txTime uint16) error
 
 	// Disconnected returns a receiving channel, which is closed when the connection disconnects.
 	Disconnected() <-chan struct{}

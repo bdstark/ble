@@ -99,6 +99,27 @@ type Conn struct {
 	// interleaving analysis.
 	muUpdate     sync.Mutex
 	updateWaiter chan leConnUpdate
+
+	// muDataLen guards dataLen, the last data-length maximums negotiated for
+	// this connection. handleLEDataLengthChange (on sktLoop) writes it; the
+	// DataLength getter reads it from arbitrary goroutines (telemetry), so the
+	// mutex — not a bare field — keeps that race clean. Unlike updateWaiter
+	// there is no per-call waiter: an LE Data Length Change event is
+	// asynchronous, optional, and may be peer-initiated, so it is never
+	// delivered to a specific SetDataLength call, only stored here.
+	muDataLen sync.Mutex
+	dataLen   dataLength
+}
+
+// dataLength holds the effective LE data-length maximums for a connection: the
+// largest link-layer payload (and its air time) the local controller will use
+// for transmit and receive on this link. Before any LE Data Length Change
+// event it holds the BLE defaults (27 octets / 328 µs) [Vol 6, Part B, 4.5.10].
+type dataLength struct {
+	maxTxOctets uint16
+	maxTxTime   uint16
+	maxRxOctets uint16
+	maxRxTime   uint16
 }
 
 // leConnUpdate carries the fields of an LE Connection Update Complete meta
@@ -149,6 +170,14 @@ func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 		txBuffer: newTxCredits(h.pool),
 
 		chDone: make(chan struct{}),
+
+		// Default LE data length before any negotiation [Vol 6, Part B, 4.5.10].
+		dataLen: dataLength{
+			maxTxOctets: ble.DataLengthMinTxOctets,
+			maxTxTime:   ble.DataLengthMinTxTime,
+			maxRxOctets: ble.DataLengthMinTxOctets,
+			maxRxTime:   ble.DataLengthMinTxTime,
+		},
 	}
 
 	go func() {
@@ -549,6 +578,71 @@ func (c *Conn) deliverConnUpdate(u leConnUpdate) {
 	case ch <- u:
 	default:
 	}
+}
+
+// SetDataLength issues an LE Set Data Length (0x08|0x0022) on this central
+// link, asking the controller to use up to txOctets-octet link-layer payloads
+// (txTime µs of air time) for this connection. The daemon uses this to cut the
+// packet count — and thus 2.4 GHz airtime — of large-MTU GATT transfers as
+// more devices share the adapter.
+//
+// txOctets/txTime are validated by ble.ValidateDataLength; an out-of-range
+// value returns ErrInvalidDataLength (wrapped) without touching the controller.
+//
+// Design: unlike UpdateParams, this waits ONLY on the command's Command
+// Complete, not on a meta event. LE Set Data Length returns a Command Complete
+// carrying a status immediately (accepted/rejected); c.hci.Send surfaces a
+// non-zero status as ErrCommand before it unmarshals the return parameters, so
+// the returned error already distinguishes rejection from success. The
+// negotiated length arrives LATER — if it changes at all — as an asynchronous
+// LE Data Length Change event that may also be triggered by the peer, so it is
+// not 1:1 with this call and must not be waited on here (that would hang
+// whenever the effective length is unchanged). handleLEDataLengthChange records
+// the result on the Conn for DataLength() to read. The command itself is
+// bounded by the HCI command timeout inside Send; ctx only short-circuits an
+// already-cancelled caller before the command is sent.
+func (c *Conn) SetDataLength(ctx context.Context, txOctets, txTime uint16) error {
+	if err := ble.ValidateDataLength(txOctets, txTime); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	rp := cmd.LESetDataLengthRP{}
+	if err := c.hci.Send(&cmd.LESetDataLength{
+		ConnectionHandle: c.param.ConnectionHandle(),
+		TxOctets:         txOctets,
+		TxTime:           txTime,
+	}, &rp); err != nil {
+		return fmt.Errorf("hci: LE set data length: %w", err)
+	}
+	return nil
+}
+
+// DataLength returns the effective LE data-length maximums last negotiated for
+// this connection: the largest link-layer payload (octets) and its air time
+// (µs) the controller will use to transmit and receive. Before any LE Data
+// Length Change event it returns the BLE defaults (27 octets / 328 µs).
+//
+// It is safe to call from any goroutine (telemetry reads it while sktLoop
+// writes it); the read is guarded by muDataLen. This is linux-concrete rather
+// than on the ble.Conn interface because CoreBluetooth exposes no equivalent.
+func (c *Conn) DataLength() (maxTxOctets, maxTxTime, maxRxOctets, maxRxTime uint16) {
+	c.muDataLen.Lock()
+	defer c.muDataLen.Unlock()
+	return c.dataLen.maxTxOctets, c.dataLen.maxTxTime, c.dataLen.maxRxOctets, c.dataLen.maxRxTime
+}
+
+// setDataLength records the negotiated data-length maximums from an LE Data
+// Length Change event. It runs on the sktLoop goroutine (via
+// handleLEDataLengthChange) and only takes muDataLen for the brief store, so it
+// never blocks sktLoop.
+func (c *Conn) setDataLength(dl dataLength) {
+	c.muDataLen.Lock()
+	c.dataLen = dl
+	c.muDataLen.Unlock()
 }
 
 // closeChans closes chInPkt and chDone, exactly once, in that order.

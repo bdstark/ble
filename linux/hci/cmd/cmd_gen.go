@@ -1560,3 +1560,69 @@ type LERemoteConnectionParameterRequestNegativeReplyRP struct {
 func (c *LERemoteConnectionParameterRequestNegativeReplyRP) Unmarshal(b []byte) error {
 	return unmarshal(c, b)
 }
+
+// LESetDataLength implements LE Set Data Length (0x08|0x0022) [Vol 2, Part E, 7.8.33]
+type LESetDataLength struct {
+	ConnectionHandle uint16
+	TxOctets         uint16
+	TxTime           uint16
+}
+
+func (c *LESetDataLength) String() string {
+	return "LE Set Data Length (0x08|0x0022)"
+}
+
+// OpCode returns the opcode of the command.
+func (c *LESetDataLength) OpCode() int { return 0x08<<10 | 0x0022 }
+
+// Len returns the length of the command.
+func (c *LESetDataLength) Len() int { return 6 }
+
+// Marshal serializes the command parameters into binary form.
+func (c *LESetDataLength) Marshal(b []byte) error {
+	return marshal(c, b)
+}
+
+// LESetDataLengthRP returns the return parameter of LE Set Data Length
+type LESetDataLengthRP struct {
+	Status           uint8
+	ConnectionHandle uint16
+}
+
+// Unmarshal de-serializes the binary data and stores the result in the receiver.
+func (c *LESetDataLengthRP) Unmarshal(b []byte) error {
+	return unmarshal(c, b)
+}
+
+// LEReadMaximumDataLength implements LE Read Maximum Data Length (0x08|0x002F) [Vol 2, Part E, 7.8.46]
+type LEReadMaximumDataLength struct {
+}
+
+func (c *LEReadMaximumDataLength) String() string {
+	return "LE Read Maximum Data Length (0x08|0x002F)"
+}
+
+// OpCode returns the opcode of the command.
+func (c *LEReadMaximumDataLength) OpCode() int { return 0x08<<10 | 0x002F }
+
+// Len returns the length of the command.
+func (c *LEReadMaximumDataLength) Len() int { return 0 }
+
+// Marshal serializes the command parameters into binary form.
+func (c *LEReadMaximumDataLength) Marshal(b []byte) error {
+	return marshal(c, b)
+}
+
+// LEReadMaximumDataLengthRP returns the return parameter of LE Read Maximum Data Length
+type LEReadMaximumDataLengthRP struct {
+	Status               uint8
+	SupportedMaxTxOctets uint16
+	SupportedMaxTxTime   uint16
+	SupportedMaxRxOctets uint16
+	SupportedMaxRxTime   uint16
+}
+
+// Unmarshal de-serializes the binary data and stores the result in the receiver.
+func (c *LEReadMaximumDataLengthRP) Unmarshal(b []byte) error {
+	return unmarshal(c, b)
+}

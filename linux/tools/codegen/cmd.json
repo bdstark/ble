@@ -1241,6 +1241,63 @@
                         "Events": [
                                 "Command Complete"
                         ]
+                },
+                {
+                        "Name": "LE Set Data Length",
+                        "Spec": "Vol 2, Part E, 7.8.33",
+                        "OGF": "0x08",
+                        "OCF": "0x0022",
+                        "Len": 6,
+                        "Param": [
+                                {
+                                        "Connection Handle": "uint16"
+                                },
+                                {
+                                        "Tx Octets": "uint16"
+                                },
+                                {
+                                        "Tx Time": "uint16"
+                                }
+                        ],
+                        "Return": [
+                                {
+                                        "Status": "uint8"
+                                },
+                                {
+                                        "Connection Handle": "uint16"
+                                }
+                        ],
+                        "Events": [
+                                "Command Complete"
+                        ]
+                },
+                {
+                        "Name": "LE Read Maximum Data Length",
+                        "Spec": "Vol 2, Part E, 7.8.46",
+                        "OGF": "0x08",
+                        "OCF": "0x002F",
+                        "Len": 0,
+                        "Param": [],
+                        "Return": [
+                                {
+                                        "Status": "uint8"
+                                },
+                                {
+                                        "Supported Max Tx Octets": "uint16"
+                                },
+                                {
+                                        "Supported Max Tx Time": "uint16"
+                                },
+                                {
+                                        "Supported Max Rx Octets": "uint16"
+                                },
+                                {
+                                        "Supported Max Rx Time": "uint16"
+                                }
+                        ],
+                        "Events": [
+                                "Command Complete"
+                        ]
                 }
         ]
 }

@@ -157,6 +157,7 @@ func (h *HCI) Init() error {
 	h.subh[evt.LEAdvertisingReportSubCode] = h.handleLEAdvertisingReport
 	h.subh[evt.LEConnectionCompleteSubCode] = h.handleLEConnectionComplete
 	h.subh[evt.LEConnectionUpdateCompleteSubCode] = h.handleLEConnectionUpdateComplete
+	h.subh[evt.LEDataLengthChangeSubCode] = h.handleLEDataLengthChange
 	h.subh[evt.LELongTermKeyRequestSubCode] = h.handleLELongTermKeyRequest
 	// evt.EncryptionChangeCode:                     todo),
 	// evt.ReadRemoteVersionInformationCompleteCode: todo),
@@ -841,6 +842,44 @@ func (h *HCI) handleLEConnectionUpdateComplete(b []byte) error {
 		latency:  e.ConnLatency(),
 		timeout:  e.SupervisionTimeout(),
 	})
+	return nil
+}
+
+// handleLEDataLengthChange records the negotiated LE data-length maximums from
+// an LE Data Length Change meta event on the owning connection, for DataLength()
+// to read. It runs on the sktLoop goroutine, so it must never block: the conn
+// lookup mirrors handleLEConnectionUpdateComplete (guarded by muConns) and
+// setDataLength only takes a brief mutex to store the value — there is no
+// waiter to deliver to, because this event is asynchronous, optional, and can
+// be peer-initiated (unsolicited DLE), so it is never correlated 1:1 with a
+// SetDataLength call. An event for a handle with no registered conn (a change
+// racing teardown) is a harmless no-op.
+//
+// Like the sibling meta-event handlers this trusts the controller's event
+// length by convention and does not length-guard the accessors.
+func (h *HCI) handleLEDataLengthChange(b []byte) error {
+	e := evt.LEDataLengthChange(b)
+	h.muConns.Lock()
+	c, found := h.conns[e.ConnectionHandle()]
+	h.muConns.Unlock()
+	if !found {
+		if logDebugEnabled() {
+			ble.Logger.Debug("hci: LE data length change for unknown handle", "handle", e.ConnectionHandle())
+		}
+		return nil
+	}
+	c.setDataLength(dataLength{
+		maxTxOctets: e.MaxTxOctets(),
+		maxTxTime:   e.MaxTxTime(),
+		maxRxOctets: e.MaxRxOctets(),
+		maxRxTime:   e.MaxRxTime(),
+	})
+	if logDebugEnabled() {
+		ble.Logger.Debug("hci: LE data length change",
+			"handle", e.ConnectionHandle(),
+			"maxTxOctets", e.MaxTxOctets(), "maxTxTime", e.MaxTxTime(),
+			"maxRxOctets", e.MaxRxOctets(), "maxRxTime", e.MaxRxTime())
+	}
 	return nil
 }
 

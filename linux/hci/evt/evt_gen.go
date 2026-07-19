@@ -225,3 +225,24 @@ type AuthenticatedPayloadTimeoutExpired []byte
 func (r AuthenticatedPayloadTimeoutExpired) ConnectionHandle() uint16 {
 	return binary.LittleEndian.Uint16(r[0:])
 }
+
+const LEDataLengthChangeCode = 0x3E
+
+const LEDataLengthChangeSubCode = 0x07
+
+// LEDataLengthChange implements LE Data Length Change (0x3E:0x07) [Vol 2, Part E, 7.7.65.7].
+// Unlike LE Connection Update Complete this subevent carries no status byte:
+// the connection handle is at offset 1, directly after the subevent code.
+type LEDataLengthChange []byte
+
+func (r LEDataLengthChange) SubeventCode() uint8 { return r[0] }
+
+func (r LEDataLengthChange) ConnectionHandle() uint16 { return binary.LittleEndian.Uint16(r[1:]) }
+
+func (r LEDataLengthChange) MaxTxOctets() uint16 { return binary.LittleEndian.Uint16(r[3:]) }
+
+func (r LEDataLengthChange) MaxTxTime() uint16 { return binary.LittleEndian.Uint16(r[5:]) }
+
+func (r LEDataLengthChange) MaxRxOctets() uint16 { return binary.LittleEndian.Uint16(r[7:]) }
+
+func (r LEDataLengthChange) MaxRxTime() uint16 { return binary.LittleEndian.Uint16(r[9:]) }

@@ -157,6 +157,9 @@ func (p *pipeConn) ReadRSSI() (int, error)         { return 0, nil }
 func (p *pipeConn) UpdateParams(context.Context, ble.ConnParams) error {
 	return nil
 }
+func (p *pipeConn) SetDataLength(context.Context, uint16, uint16) error {
+	return nil
+}
 func (p *pipeConn) Disconnected() <-chan struct{} { return nil }
 
 // valueRecorder collects handler-written values under a lock (the server

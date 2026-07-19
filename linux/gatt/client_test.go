@@ -66,6 +66,9 @@ func (f *fakeConn) ReadRSSI() (int, error)         { return -42, nil }
 func (f *fakeConn) UpdateParams(context.Context, ble.ConnParams) error {
 	return nil
 }
+func (f *fakeConn) SetDataLength(context.Context, uint16, uint16) error {
+	return nil
+}
 func (f *fakeConn) Disconnected() <-chan struct{} { return f.closed }
 
 // fakeServer models a tiny GATT server: one primary service (handles 1-5)
