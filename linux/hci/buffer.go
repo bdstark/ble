@@ -61,6 +61,12 @@ func (c *Client) Get() *bytes.Buffer {
 // disconnect event those never arrive, and a bare Get would block its
 // caller forever.
 func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffer, error) {
+	// time.NewTimer + Stop instead of time.After: a buffer is usually
+	// available immediately, and time.After would leave a live timer
+	// (and its channel) around for the full duration on every ACL TX
+	// fragment.
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case b := <-c.p.ch:
 		b.Reset()
@@ -68,7 +74,7 @@ func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffe
 		return b, nil
 	case <-done:
 		return nil, fmt.Errorf("connection closed while waiting for ACL buffer: %w", ErrClosed)
-	case <-time.After(d):
+	case <-t.C:
 		return nil, ErrCreditTimeout
 	}
 }

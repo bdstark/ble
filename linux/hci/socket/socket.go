@@ -51,10 +51,12 @@ type devListRequest struct {
 
 // Socket implements a HCI User Channel as ReadWriteCloser.
 type Socket struct {
-	fd     int
-	closed chan struct{}
-	rmu    sync.Mutex
-	wmu    sync.Mutex
+	fd        int
+	closed    chan struct{}
+	rmu       sync.Mutex
+	wmu       sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewSocket returns a HCI User Channel of specified device id.
@@ -152,13 +154,20 @@ func (s *Socket) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// Close is idempotent: HCI teardown is reachable from several paths
+// (I/O errors, command timeouts, and an explicit Device.Stop), which
+// can each end up here. Only the first call closes the socket; later
+// calls return the first call's error so every caller sees the same
+// outcome.
 func (s *Socket) Close() error {
-	close(s.closed)
-	s.Write([]byte{0x01, 0x09, 0x10, 0x00}) // no-op command to wake up the Read call if it's blocked
-	s.rmu.Lock()
-	defer s.rmu.Unlock()
-	if err := unix.Close(s.fd); err != nil {
-		return fmt.Errorf("can't close hci socket: %w", err)
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		close(s.closed)
+		s.Write([]byte{0x01, 0x09, 0x10, 0x00}) // no-op command to wake up the Read call if it's blocked
+		s.rmu.Lock()
+		defer s.rmu.Unlock()
+		if err := unix.Close(s.fd); err != nil {
+			s.closeErr = fmt.Errorf("can't close hci socket: %w", err)
+		}
+	})
+	return s.closeErr
 }
