@@ -58,8 +58,13 @@ type Client interface {
 	// WriteDescriptor writes a characteristic descriptor to a server. [Vol 3, Part G, 4.12.3]
 	WriteDescriptor(ctx context.Context, d *Descriptor, v []byte) error
 
-	// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-	ReadRSSI(ctx context.Context) int
+	// ReadRSSI retrieves the current RSSI value of the remote peripheral, in
+	// dBm. [Vol 2, Part E, 7.5.4] The underlying command exchange is bounded
+	// by the backend's own internal timeout and cannot be interrupted
+	// mid-flight; per the contract above, ctx bounds only this caller's wait
+	// — on expiry ctx.Err() is returned and the exchange's eventual result
+	// is discarded.
+	ReadRSSI(ctx context.Context) (int, error)
 
 	// ExchangeMTU set the ATT_MTU to the maximum possible value that can be supported by both devices [Vol 3, Part G, 4.3.1]
 	ExchangeMTU(ctx context.Context, rxMTU int) (txMTU int, err error)

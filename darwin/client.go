@@ -327,10 +327,27 @@ func (cln *Client) WriteDescriptor(ctx context.Context, d *ble.Descriptor, b []b
 	return nil
 }
 
-// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-// The wait on the CoreBluetooth callback is bounded internally, not by ctx.
-func (cln *Client) ReadRSSI(ctx context.Context) int {
-	return cln.conn.ReadRSSI()
+// ReadRSSI retrieves the current RSSI value of the remote peripheral, in
+// dBm. [Vol 2, Part E, 7.5.4] The CoreBluetooth callback wait is bounded by
+// the connection's lifetime, not by ctx; per the ble.Client contract, ctx
+// bounds only this caller's wait — on expiry ctx.Err() is returned and the
+// callback's eventual result is discarded.
+func (cln *Client) ReadRSSI(ctx context.Context) (int, error) {
+	type result struct {
+		rssi int
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		rssi, err := cln.conn.ReadRSSI()
+		ch <- result{rssi, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.rssi, r.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }
 
 // ExchangeMTU set the ATT_MTU to the maximum possible value that can be

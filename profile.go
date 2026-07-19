@@ -91,6 +91,10 @@ type Service struct {
 	UUID            UUID
 	Characteristics []*Characteristic
 
+	// Includes holds the services discovered by
+	// Client.DiscoverIncludedServices for this service.
+	Includes []*Service
+
 	Handle    uint16
 	EndHandle uint16
 }

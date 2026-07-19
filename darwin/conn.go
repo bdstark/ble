@@ -141,8 +141,10 @@ func (c *conn) Disconnected() <-chan struct{} {
 	return c.done
 }
 
-// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-func (c *conn) ReadRSSI() int {
+// ReadRSSI retrieves the current RSSI value of the remote peripheral, in
+// dBm. [Vol 2, Part E, 7.5.4] The value and error come straight from the
+// CoreBluetooth didReadRSSI callback (see Client.DidReadRSSI).
+func (c *conn) ReadRSSI() (int, error) {
 	ch := c.evl.rssiRead.Listen()
 	defer c.evl.rssiRead.Close()
 
@@ -150,11 +152,17 @@ func (c *conn) ReadRSSI() int {
 
 	select {
 	case itf := <-ch:
-		ev := itf.(*eventRSSIRead)
-		if ev.err != nil {
-			return 0
+		ev, ok := itf.(*eventRSSIRead)
+		if !ok {
+			// The event slot was closed under us (connection teardown).
+			return 0, fmt.Errorf("disconnected")
 		}
-		return ev.rssi
+		if ev.err != nil {
+			return 0, ev.err
+		}
+		return ev.rssi, nil
+	case <-c.done:
+		return 0, fmt.Errorf("disconnected")
 	}
 }
 

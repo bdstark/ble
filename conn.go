@@ -33,8 +33,11 @@ type Conn interface {
 	// SetTxMTU sets the ATT_MTU which the remote device is capable of accepting.
 	SetTxMTU(mtu int)
 
-	// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-	ReadRSSI() int
+	// ReadRSSI retrieves the current RSSI value of the remote peripheral, in
+	// dBm. [Vol 2, Part E, 7.5.4] Any transport or command failure is
+	// reported as an error rather than a fabricated zero reading. The
+	// exchange is bounded by the backend's own command timeout.
+	ReadRSSI() (int, error)
 
 	// Disconnected returns a receiving channel, which is closed when the connection disconnects.
 	Disconnected() <-chan struct{}

@@ -368,13 +368,20 @@ func (c *Conn) Disconnected() <-chan struct{} {
 	return c.chDone
 }
 
-// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-func (c *Conn) ReadRSSI() int {
+// ReadRSSI retrieves the current RSSI value of the remote peripheral, in
+// dBm. [Vol 2, Part E, 7.5.4] The exchange is bounded by the HCI command
+// timeout. Send surfaces a non-zero command status as ErrCommand before
+// unmarshaling the return parameters (the codebase-wide status check), so
+// rp is only consulted on success and a failure can never be mistaken for
+// a zero-dBm reading.
+func (c *Conn) ReadRSSI() (int, error) {
 	rp := new(cmd.ReadRSSIRP)
-	c.hci.Send(&cmd.ReadRSSI{
+	if err := c.hci.Send(&cmd.ReadRSSI{
 		Handle: c.param.ConnectionHandle(),
-	}, rp)
-	return int(rp.RSSI)
+	}, rp); err != nil {
+		return 0, fmt.Errorf("hci: read RSSI: %w", err)
+	}
+	return int(rp.RSSI), nil
 }
 
 // closeChans closes chInPkt and chDone, exactly once, in that order.

@@ -62,7 +62,7 @@ func (f *fakeConn) RxMTU() int                     { return ble.DefaultMTU }
 func (f *fakeConn) SetRxMTU(mtu int)               {}
 func (f *fakeConn) TxMTU() int                     { return ble.DefaultMTU }
 func (f *fakeConn) SetTxMTU(mtu int)               {}
-func (f *fakeConn) ReadRSSI() int                  { return -42 }
+func (f *fakeConn) ReadRSSI() (int, error)         { return -42, nil }
 func (f *fakeConn) Disconnected() <-chan struct{}  { return f.closed }
 
 // fakeServer models a tiny GATT server: one primary service (handles 1-5)
@@ -134,7 +134,17 @@ func (s *fakeServer) respond(req []byte) []byte {
 		// One service: handles 1..5, 16-bit UUID 0x180F.
 		return []byte{att.ReadByGroupTypeResponseCode, 6,
 			0x01, 0x00, 0x05, 0x00, 0x0F, 0x18}
-	case att.ReadByTypeRequestCode: // characteristic discovery
+	case att.ReadByTypeRequestCode:
+		// The client uses this PDU for characteristic discovery (0x2803),
+		// include discovery (0x2802), and the lazy GAP device-name read
+		// (0x2A00). This plain fixture has no includes and no GAP name.
+		if len(req) == 7 {
+			switch binary.LittleEndian.Uint16(req[5:7]) {
+			case 0x2802, 0x2A00:
+				return errAttrNotFound(op)
+			}
+		}
+		// characteristic discovery
 		s.discovery[op]++
 		if s.discovery[op] > 1 {
 			return errAttrNotFound(op)
@@ -268,10 +278,11 @@ func TestClientDiscoverProfile(t *testing.T) {
 		t.Fatal("Profile() did not return the discovered profile")
 	}
 
-	// DiscoverIncludedServices is a stub; pin its (nil, nil) contract.
+	// A service without includes yields an empty non-nil slice and nil
+	// error (the walk ran; the old stub's (nil, nil) faked success).
 	inc, err := cln.DiscoverIncludedServices(ctx, nil, s)
-	if inc != nil || err != nil {
-		t.Fatalf("DiscoverIncludedServices = (%v, %v), want (nil, nil)", inc, err)
+	if inc == nil || len(inc) != 0 || err != nil {
+		t.Fatalf("DiscoverIncludedServices = (%v, %v), want ([], nil)", inc, err)
 	}
 }
 
@@ -323,8 +334,8 @@ func TestClientReadWriteAndMTU(t *testing.T) {
 		t.Fatalf("WriteDescriptor: %v", err)
 	}
 
-	if rssi := cln.ReadRSSI(ctx); rssi != -42 {
-		t.Fatalf("ReadRSSI = %d, want -42 (from the conn)", rssi)
+	if rssi, err := cln.ReadRSSI(ctx); err != nil || rssi != -42 {
+		t.Fatalf("ReadRSSI = (%d, %v), want (-42, nil) (from the conn)", rssi, err)
 	}
 
 	mtu, err := cln.ExchangeMTU(ctx, ble.DefaultMTU)
