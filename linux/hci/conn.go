@@ -103,7 +103,7 @@ func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 				if err != io.EOF {
 					// TODO: wrap and pass the error up.
 					// err := errors.Wrap(err, "recombine failed")
-					_ = logger.Error("recombine failed: ", "err", err)
+					ble.Logger.Error("recombine failed", "err", err)
 				}
 				close(c.chInPDU)
 				return
@@ -302,7 +302,8 @@ func (c *Conn) recombine() error {
 	case cidSMP:
 		c.handleSMP(p)
 	default:
-		logger.Info("recombine()", "unrecognized CID", fmt.Sprintf("%04X, [%X]", p.cid(), p))
+		// Abnormal path (unknown channel); eager formatting is acceptable here.
+		ble.Logger.Info("recombine: unrecognized CID", "cid", fmt.Sprintf("%04X", p.cid()), "pdu", fmt.Sprintf("[%X]", p))
 	}
 	return nil
 }

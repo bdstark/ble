@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
 )
 
@@ -101,12 +102,16 @@ func (c *Conn) sendResponse(code uint8, id uint8, r Signal) (int, error) {
 	if err := binary.Write(buf, binary.LittleEndian, data); err != nil {
 		return 0, err
 	}
-	logger.Debug("sig", "send", fmt.Sprintf("[%X]", buf.Bytes()))
+	if logDebugEnabled() {
+		ble.Logger.Debug("sig send", "pdu", fmt.Sprintf("[%X]", buf.Bytes()))
+	}
 	return c.writePDU(buf.Bytes())
 }
 
 func (c *Conn) handleSignal(p pdu) error {
-	logger.Debug("sig", "recv", fmt.Sprintf("[%X]", p))
+	if logDebugEnabled() {
+		ble.Logger.Debug("sig recv", "pdu", fmt.Sprintf("[%X]", p))
+	}
 	// When multiple commands are included in an L2CAP packet and the packet
 	// exceeds the signaling MTU (MTUsig) of the receiver, a single Command Reject
 	// packet shall be sent in response. The identifier shall match the first Request
@@ -121,7 +126,7 @@ func (c *Conn) handleSignal(p pdu) error {
 				Data:   []byte{uint8(c.sigRxMTU), uint8(c.sigRxMTU >> 8)}, // Actual MTUsig.
 			})
 		if err != nil {
-			_ = logger.Error("send repsonse", fmt.Sprintf("%v", err))
+			ble.Logger.Error("sig: send response failed", "err", err)
 		}
 		return nil
 	}

@@ -3,7 +3,6 @@ package hci
 import (
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -333,9 +332,9 @@ func (h *HCI) sktLoop() {
 			// Some bluetooth devices may append vendor specific packets at the last,
 			// in this case, simply ignore them.
 			if strings.HasPrefix(err.Error(), "unsupported vendor packet:") {
-				_ = logger.Error("skt: %v", err)
+				ble.Logger.Error("skt: ignoring vendor packet", "err", err)
 			} else {
-				log.Printf("skt: %v", err)
+				ble.Logger.Error("skt: failed to handle packet", "err", err)
 				continue
 			}
 		}
@@ -375,7 +374,7 @@ func (h *HCI) handleACL(b []byte) error {
 	c, ok := h.conns[handle]
 	h.muConns.Unlock()
 	if !ok {
-		_ = logger.Warn("invalid connection handle on ACL packet", "handle", handle)
+		ble.Logger.Warn("invalid connection handle on ACL packet", "handle", handle)
 		return nil
 	}
 	c.chInPkt <- b

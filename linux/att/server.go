@@ -143,7 +143,7 @@ func (s *Server) Loop() {
 				select {
 				case s.chConfirm <- true:
 				default:
-					logger.Error("server", "received a spurious confirmation", nil)
+					ble.Logger.Error("server: received a spurious confirmation")
 				}
 				continue
 			}
@@ -162,7 +162,7 @@ func (s *Server) Loop() {
 	}
 	for h, ccc := range s.conn.cccs {
 		if ccc != 0 {
-			logger.Info("cleanup", ble.ContextKeyCCC, fmt.Sprintf("0x%02X", ccc))
+			ble.Logger.Info("server cleanup", "ccc", fmt.Sprintf("0x%02X", ccc))
 		}
 		if ccc&cccIndicate != 0 {
 			s.conn.in[h].Close()
@@ -175,7 +175,9 @@ func (s *Server) Loop() {
 
 func (s *Server) handleRequest(b []byte) []byte {
 	var resp []byte
-	logger.Debug("server", "req", fmt.Sprintf("% X", b))
+	if logDebugEnabled() {
+		ble.Logger.Debug("server req", "pdu", fmt.Sprintf("% X", b))
+	}
 	switch reqType := b[0]; reqType {
 	case ExchangeMTURequestCode:
 		resp = s.handleExchangeMTURequest(b)
@@ -205,7 +207,9 @@ func (s *Server) handleRequest(b []byte) []byte {
 	default:
 		resp = newErrorResponse(reqType, 0x0000, ble.ErrReqNotSupp)
 	}
-	logger.Debug("server", "rsp", fmt.Sprintf("% X", resp))
+	if logDebugEnabled() {
+		ble.Logger.Debug("server rsp", "pdu", fmt.Sprintf("% X", resp))
+	}
 	return resp
 }
 
@@ -533,7 +537,9 @@ func (s *Server) handleWriteRequest(r WriteRequest) []byte {
 }
 
 func (s *Server) handlePrepareWriteRequest(r PrepareWriteRequest) []byte {
-	logger.Debug("handlePrepareWriteRequest ->", "r.AttributeHandle", r.AttributeHandle())
+	if logDebugEnabled() {
+		ble.Logger.Debug("handlePrepareWriteRequest", "handle", r.AttributeHandle())
+	}
 	// Validate the request.
 	switch {
 	case len(r) < 3:
@@ -638,8 +644,12 @@ func handleATT(a *attr, s *Server, req []byte, rsp ble.ResponseWriter) ble.ATTEr
 			return ble.ErrWriteNotPerm
 		}
 		data = PrepareWriteRequest(req).PartAttributeValue()
-		logger.Debug("handleATT", "PartAttributeValue",
-			fmt.Sprintf("data: %x, offset: %d, %p\n", data, int(PrepareWriteRequest(req).ValueOffset()), s.prepareWriteRequestAttr))
+		if logDebugEnabled() {
+			ble.Logger.Debug("handleATT PartAttributeValue",
+				"data", fmt.Sprintf("%x", data),
+				"offset", int(PrepareWriteRequest(req).ValueOffset()),
+				"attr", fmt.Sprintf("%p", s.prepareWriteRequestAttr))
+		}
 
 		if s.prepareWriteRequestAttr == nil {
 			s.prepareWriteRequestAttr = a

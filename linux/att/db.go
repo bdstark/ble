@@ -144,14 +144,16 @@ func genDescAttr(d *ble.Descriptor, h uint16) *attr {
 
 // DumpAttributes ...
 func DumpAttributes(aa []*attr) {
-	logger.Debug("server", "db", "Generating attribute table:")
-	logger.Debug("server", "db", "handle   endh   type")
+	if !logDebugEnabled() {
+		return
+	}
+	ble.Logger.Debug("server db: generating attribute table (handle, endh, type)")
 	for _, a := range aa {
 		if a.v != nil {
-			logger.Debug("server", "db", fmt.Sprintf("0x%04X 0x%04X 0x%s [% X]", a.h, a.endh, a.typ, a.v))
+			ble.Logger.Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s [% X]", a.h, a.endh, a.typ, a.v))
 			continue
 		}
-		logger.Debug("server", "db", fmt.Sprintf("0x%04X 0x%04X 0x%s", a.h, a.endh, a.typ))
+		ble.Logger.Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s", a.h, a.endh, a.typ))
 	}
 }
 

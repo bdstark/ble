@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+
+	"github.com/go-ble/ble"
 )
 
 const (
@@ -35,12 +37,16 @@ func (c *Conn) sendSMP(p pdu) error {
 		return err
 	}
 	_, err := c.writePDU(buf.Bytes())
-	logger.Debug("smp", "send", fmt.Sprintf("[%X]", buf.Bytes()))
+	if logDebugEnabled() {
+		ble.Logger.Debug("smp send", "pdu", fmt.Sprintf("[%X]", buf.Bytes()))
+	}
 	return err
 }
 
 func (c *Conn) handleSMP(p pdu) error {
-	logger.Debug("smp", "recv", fmt.Sprintf("[%X]", p))
+	if logDebugEnabled() {
+		ble.Logger.Debug("smp recv", "pdu", fmt.Sprintf("[%X]", p))
+	}
 	code := p[0]
 	switch code {
 	case pairingRequest:
