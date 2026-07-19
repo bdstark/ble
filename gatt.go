@@ -123,32 +123,55 @@ func Dial(ctx context.Context, a Addr) (Client, error) {
 }
 
 // Connect searches for and connects to a Peripheral which matches specified condition.
+//
+// Whether a device was found is decided solely by draining the buffered
+// found channel after Scan returns — never by which cancellation error Scan
+// reported. The previous implementation cancelled the scan context from the
+// advertisement handler and then treated Scan's context.Canceled as "match":
+// when the parent ctx expired, its watcher could cancel the scan first,
+// Scan returned context.Canceled with no match, and Connect blocked forever
+// on an unbuffered channel nobody would ever send to. This library drives an
+// unattended RV BLE gateway; that wedge was hit live.
 func Connect(ctx context.Context, f AdvFilter) (Client, error) {
-	ctx2, cancel := context.WithCancel(ctx)
-	go func() {
-		select {
-		case <-ctx.Done():
-			cancel()
-		case <-ctx2.Done():
-		}
-	}()
+	if defaultDevice == nil {
+		return nil, ErrDefaultDevice
+	}
 
-	ch := make(chan Advertisement)
+	scanCtx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan()
+
+	// Buffered so the handler's send never blocks: additional matches (the
+	// scan keeps delivering briefly after cancellation) fall through the
+	// default case instead of leaking a blocked handler.
+	found := make(chan Advertisement, 1)
 	fn := func(a Advertisement) {
-		cancel()
-		ch <- a
-	}
-	if err := Scan(ctx2, false, fn, f); err != nil {
-		if err != context.Canceled {
-			return nil, fmt.Errorf("can't scan: %w", err)
+		select {
+		case found <- a:
+			cancelScan() // First match: stop scanning.
+		default:
 		}
 	}
+	err := Scan(scanCtx, false, fn, f)
 
-	cln, err := Dial(ctx, (<-ch).Addr())
-	if err != nil {
-		return nil, fmt.Errorf("can't dial: %w", err)
+	select {
+	case a := <-found:
+		cln, derr := Dial(ctx, a.Addr())
+		if derr != nil {
+			return nil, fmt.Errorf("can't dial: %w", derr)
+		}
+		return cln, nil
+	default:
 	}
-	return cln, nil
+
+	// No match. Prefer the parent context's error so callers can
+	// errors.Is against context.DeadlineExceeded / context.Canceled.
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("can't connect: no advertisement matched: %w", cerr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("can't scan: %w", err)
+	}
+	return nil, errors.New("can't connect: scan ended without a matching advertisement")
 }
 
 // A NotificationHandler handles notification or indication from a server.

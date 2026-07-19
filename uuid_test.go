@@ -26,3 +26,24 @@ func TestReverse(t *testing.T) {
 		}
 	}
 }
+
+func TestContainsIsPlainMembership(t *testing.T) {
+	u := UUID16(0x1800)
+	other := UUID16(0x180f)
+
+	// Breaking change pinned here: a nil slice contains nothing. The old
+	// "nil filter matches everything" behavior returned true and turned
+	// membership tests into always-true footguns.
+	if Contains(nil, u) {
+		t.Error("Contains(nil, u) = true, want false")
+	}
+	if Contains([]UUID{}, u) {
+		t.Error("Contains(empty, u) = true, want false")
+	}
+	if !Contains([]UUID{other, u}, u) {
+		t.Error("Contains(s, u) = false for a present element, want true")
+	}
+	if Contains([]UUID{other}, u) {
+		t.Error("Contains(s, u) = true for an absent element, want false")
+	}
+}

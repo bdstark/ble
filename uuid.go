@@ -68,11 +68,13 @@ func (u UUID) Equal(v UUID) bool {
 }
 
 // Contains returns a boolean reporting whether u is in the slice s.
+//
+// This is a plain membership test: a nil (or empty) slice contains nothing
+// and yields false. Earlier versions returned true for a nil slice —
+// "no filter matches everything" semantics — which made Contains a footgun
+// for its obvious use. Call sites that want filter semantics must check for
+// the nil filter themselves (as the discovery code in linux/gatt does).
 func Contains(s []UUID, u UUID) bool {
-	if s == nil {
-		return true
-	}
-
 	for _, a := range s {
 		if a.Equal(u) {
 			return true
