@@ -16,6 +16,11 @@ var (
 	// ErrInvalidMTU means the peer proposed an ATT MTU below the spec minimum
 	// of 23 bytes (ble.DefaultMTU). [Vol 3, Part F, 3.4.2]
 	ErrInvalidMTU = errors.New("invalid MTU")
+
+	// ErrBearerClosed means the ATT bearer was closed after a transaction hit
+	// the sequential-protocol timeout [Vol 3, Part F, 3.3.3] and no further
+	// ATT traffic is valid on it. Callers must re-establish the connection.
+	ErrBearerClosed = errors.New("ATT bearer closed")
 )
 
 var rspOfReq = map[byte]byte{

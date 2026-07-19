@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +29,20 @@ func waitCond(t *testing.T, cond func() bool) {
 type mtuRecordConn struct {
 	*onceConn
 	txMTU atomic.Int64
+}
+
+// signalCloseConn defers the actual close of f.in to the feeder goroutine
+// (the sole sender): Close only raises closeSignal, so the bearer-poison
+// path's close-at-timeout cannot race a send in flight on f.in.
+type signalCloseConn struct {
+	*onceConn
+	closeSignal chan struct{}
+	signalOnce  sync.Once
+}
+
+func (c *signalCloseConn) Close() error {
+	c.signalOnce.Do(func() { close(c.closeSignal) })
+	return nil
 }
 
 func (c *mtuRecordConn) SetTxMTU(mtu int) { c.txMTU.Store(int64(mtu)) }
@@ -180,20 +195,24 @@ func TestSendReqAbsoluteDeadline(t *testing.T) {
 	seqProtoTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { seqProtoTimeout = old })
 
-	f := newOnceConn()
+	f := &signalCloseConn{onceConn: newOnceConn(), closeSignal: make(chan struct{})}
 	c := startClient(t, f)
 
 	// Unexpected PDUs every 40ms, far more often than the timeout. With a
 	// per-iteration timer each PDU would restart the clock and the request
-	// would never time out.
+	// would never time out. The feeder is the sole closer of f.in (after it
+	// stops sending); the timeout's bearer close only raises closeSignal.
 	stop := make(chan struct{})
 	feederDone := make(chan struct{})
 	go func() {
 		defer close(feederDone)
+		defer f.onceConn.Close()
 		<-f.writes // the read request
 		for {
 			select {
 			case <-stop:
+				return
+			case <-f.closeSignal:
 				return
 			case f.in <- []byte{WriteResponseCode}:
 			}

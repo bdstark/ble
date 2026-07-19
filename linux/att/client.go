@@ -38,6 +38,13 @@ type Client struct {
 	// response (see RspDropped).
 	rspDropped atomic.Uint64
 
+	// bearerClosed is set when a transaction hits the ATT sequential-protocol
+	// timeout. Per [Vol 3, Part F, 3.3.3] the bearer "shall be closed" at that
+	// point: any response arriving later could otherwise be mis-attributed to
+	// the next same-opcode request. Once set, every request fails fast with
+	// ErrBearerClosed instead of touching the (closing) connection.
+	bearerClosed atomic.Bool
+
 	rxBuf   []byte
 	chTxBuf chan []byte
 	chErr   chan error
@@ -554,6 +561,9 @@ func (c *Client) acquireTxBuf(ctx context.Context) ([]byte, error) {
 }
 
 func (c *Client) sendCmd(b []byte) error {
+	if c.bearerClosed.Load() {
+		return fmt.Errorf("send ATT command failed: %w", ErrBearerClosed)
+	}
 	_, err := c.l2c.Write(b)
 	return err
 }
@@ -567,6 +577,12 @@ var seqProtoTimeout = 30 * time.Second
 // write itself cannot be interrupted mid-write; on the linux stack it is
 // independently bounded by hci.ACLWriteTimeout.
 func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) {
+	// A previous transaction timed out and closed the bearer [Vol 3, Part F,
+	// 3.3.3]. Fail fast: writing here could pair this request with the timed-
+	// out transaction's late response — silently stale data.
+	if c.bearerClosed.Load() {
+		return nil, fmt.Errorf("ATT request refused: %w", ErrBearerClosed)
+	}
 	if logDebugEnabled() {
 		ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
 	}
@@ -613,8 +629,26 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 		case err := <-c.chErr:
 			return nil, fmt.Errorf("ATT request failed: %w", err)
 		case <-ctx.Done():
+			// Abandonment by the caller, not a protocol failure: the peer may
+			// still answer, so the bearer stays usable. Deliberately NOT
+			// poisoned — callers cancel requests during normal shutdown and
+			// reconnect, and the stale-response hazard is bounded here by the
+			// cap-1 rspc buffer plus the drain at the top of sendReq (a late
+			// response can only be consumed between requests, where it is
+			// discarded, never after the next request has been written).
 			return nil, ctx.Err()
 		case <-t.C:
+			// The transaction timed out: per [Vol 3, Part F, 3.3.3] no
+			// further ATT traffic is valid on this bearer — it "shall be
+			// closed". Poison the client (subsequent requests fail fast with
+			// ErrBearerClosed) and close the connection; Loop then exits via
+			// the failing Read. Without this, a response straggling in after
+			// the next same-opcode request was written would be silently
+			// mis-attributed as that request's response.
+			c.bearerClosed.Store(true)
+			if err := c.l2c.Close(); err != nil {
+				ble.Logger.Error("client: closing bearer after ATT timeout", "err", err)
+			}
 			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
 		}
 	}
