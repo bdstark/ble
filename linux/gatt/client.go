@@ -32,7 +32,16 @@ type Client struct {
 
 	profile *ble.Profile
 	name    string
-	subs    map[uint16]*sub
+
+	// subsMu guards subs and each sub's handler fields for HandleNotification,
+	// which must not touch the embedded client-wide mutex: request methods hold
+	// that exclusively for their entire ATT round trip, and even an RLock would
+	// queue behind them. Mutators (setHandlers, ClearSubscriptions) run under
+	// the embedded lock and additionally take subsMu around each mutation.
+	// Lock ordering: embedded lock first, then subsMu; subsMu is a leaf and is
+	// never held across an ATT round trip or a handler invocation.
+	subsMu sync.RWMutex
+	subs   map[uint16]*sub
 
 	ac   *att.Client
 	conn ble.Conn
@@ -320,7 +329,9 @@ func (p *Client) setHandlers(ctx context.Context, cccdh, vh, flag uint16, h ble.
 	s, ok := p.subs[vh]
 	if !ok {
 		s = &sub{cccdh, 0x0000, nil, nil}
+		p.subsMu.Lock()
 		p.subs[vh] = s
+		p.subsMu.Unlock()
 	}
 	switch {
 	case h == nil && (s.ccc&flag) == 0:
@@ -335,11 +346,13 @@ func (p *Client) setHandlers(ctx context.Context, cccdh, vh, flag uint16, h ble.
 
 	v := make([]byte, 2)
 	binary.LittleEndian.PutUint16(v, s.ccc)
+	p.subsMu.Lock()
 	if flag == cccNotify {
 		s.nHandler = h
 	} else {
 		s.iHandler = h
 	}
+	p.subsMu.Unlock()
 	return p.ac.Write(ctx, s.cccdh, v)
 }
 
@@ -352,7 +365,9 @@ func (p *Client) ClearSubscriptions(ctx context.Context) error {
 		if err := p.ac.Write(ctx, s.cccdh, zero); err != nil {
 			return err
 		}
+		p.subsMu.Lock()
 		delete(p.subs, vh)
+		p.subsMu.Unlock()
 	}
 	return nil
 }
@@ -376,20 +391,33 @@ func (p *Client) Conn() ble.Conn {
 	return p.conn
 }
 
-// HandleNotification ...
+// HandleNotification dispatches an incoming notification or indication PDU
+// to the matching subscriber's handler.
+//
+// The subscription's handler is snapshotted under subsMu (never the
+// client-wide mutex, which request methods — ReadCharacteristic,
+// WriteCharacteristic, Subscribe, ... — hold exclusively for their entire
+// ATT round trip) and invoked with no lock held: a notification is delivered
+// without waiting for an in-flight request, and a handler may safely call
+// back into the Client without deadlocking. The one consequence of the
+// snapshot: a handler already being dispatched may be invoked once more
+// after Unsubscribe (or ClearSubscriptions) returns.
 func (p *Client) HandleNotification(req []byte) {
-	p.Lock()
-	defer p.Unlock()
 	vh := att.HandleValueIndication(req).AttributeHandle()
+	p.subsMu.RLock()
 	sub, ok := p.subs[vh]
+	var fn ble.NotificationHandler
+	if ok {
+		fn = sub.nHandler
+		if req[0] == att.HandleValueIndicationCode {
+			fn = sub.iHandler
+		}
+	}
+	p.subsMu.RUnlock()
 	if !ok {
 		// FIXME: disconnects and propagate an error to the user.
 		ble.Logger.Warn("gatt: got an unregistered notification")
 		return
-	}
-	fn := sub.nHandler
-	if req[0] == att.HandleValueIndicationCode {
-		fn = sub.iHandler
 	}
 	if fn != nil {
 		fn(req[3:])
