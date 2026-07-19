@@ -3,7 +3,6 @@ package gatt
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/go-ble/ble"
@@ -383,7 +382,7 @@ func (p *Client) HandleNotification(req []byte) {
 	sub, ok := p.subs[vh]
 	if !ok {
 		// FIXME: disconnects and propagate an error to the user.
-		log.Printf("Got an unregistered notification")
+		ble.Logger.Warn("gatt: got an unregistered notification")
 		return
 	}
 	fn := sub.nHandler

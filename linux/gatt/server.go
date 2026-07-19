@@ -1,7 +1,6 @@
 package gatt
 
 import (
-	"log"
 	"sync"
 
 	"github.com/go-ble/ble"
@@ -93,11 +92,11 @@ func defaultServicesWithHandler(name string, handler ble.NotifyHandler) []*ble.S
 }
 
 func defaultHanderFunc(r ble.Request, n ble.Notifier) {
-	log.Printf("TODO: indicate client when the services are changed")
+	ble.Logger.Info("gatt: TODO: indicate client when the services are changed")
 	for {
 		select {
 		case <-n.Context().Done():
-			log.Printf("count: Notification unsubscribed")
+			ble.Logger.Info("gatt: notification unsubscribed")
 			return
 		}
 	}

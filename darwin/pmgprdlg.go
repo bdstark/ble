@@ -8,10 +8,9 @@ package darwin
 import (
 	"bytes"
 	"fmt"
-	"log"
 
-	"github.com/go-ble/ble"
 	"github.com/JuulLabs-OSS/cbgo"
+	"github.com/go-ble/ble"
 )
 
 func (d *Device) PeripheralManagerDidUpdateState(pmgr cbgo.PeripheralManager) {
@@ -37,7 +36,7 @@ func (d *Device) DidReceiveReadRequest(pmgr cbgo.PeripheralManager, cbreq cbgo.A
 		var err error
 		c, err = newPeripheralConn(d, cbreq.Central())
 		if err != nil {
-			log.Printf("failed to process read response: %v", err)
+			ble.Logger.Error("failed to process read response", "err", err)
 			return
 		}
 	}
@@ -63,7 +62,7 @@ func (d *Device) DidReceiveWriteRequests(pmgr cbgo.PeripheralManager, cbreqs []c
 			var err error
 			c, err = newPeripheralConn(d, cbreq.Central())
 			if err != nil {
-				log.Printf("failed to process write response: %v", err)
+				ble.Logger.Error("failed to process write response", "err", err)
 				return
 			}
 		}
@@ -86,7 +85,7 @@ func (d *Device) CentralDidSubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Cent
 		var err error
 		c, err = newPeripheralConn(d, cent)
 		if err != nil {
-			log.Printf("failed to process subscribe request: %v", err)
+			ble.Logger.Error("failed to process subscribe request", "err", err)
 			return
 		}
 	}
@@ -121,7 +120,7 @@ func (d *Device) CentralDidUnsubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Ce
 		var err error
 		c, err = newPeripheralConn(d, cent)
 		if err != nil {
-			log.Printf("failed to process unsubscribe request: %v", err)
+			ble.Logger.Error("failed to process unsubscribe request", "err", err)
 			return
 		}
 	}
@@ -129,7 +128,7 @@ func (d *Device) CentralDidUnsubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Ce
 	n := c.notifiers[chr]
 	if n != nil {
 		if err := n.Close(); err != nil {
-			log.Printf("failed to close notifier: %v", err)
+			ble.Logger.Error("failed to close notifier", "err", err)
 		}
 		delete(c.notifiers, chr)
 	}

@@ -3,7 +3,6 @@ package darwin
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/JuulLabs-OSS/cbgo"
@@ -182,7 +181,7 @@ func (c *conn) processChrRead(err error, cbchr cbgo.Characteristic) {
 	}
 
 	if !found {
-		log.Printf("received characteristic read response without corresponding request: uuid=%s", uuidStr)
+		ble.Logger.Warn("received characteristic read response without corresponding request", "uuid", uuidStr)
 	}
 }
 

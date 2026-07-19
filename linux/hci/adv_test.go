@@ -10,12 +10,12 @@ import (
 // ADV_IND report carrying flags, a complete local name ("hello"), and one
 // 16-bit service UUID.
 var advReportFixture = evt.LEAdvertisingReport([]byte{
-	0x02,       // subevent: LE Advertising Report
-	0x01,       // one report
+	0x02, // subevent: LE Advertising Report
+	0x01, // one report
 	evtTypAdvInd,
 	0x00,                               // public address
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // address
-	14, // data length
+	14,               // data length
 	0x02, 0x01, 0x06, // flags
 	0x06, 0x09, 'h', 'e', 'l', 'l', 'o', // complete local name
 	0x03, 0x03, 0xAA, 0xBB, // 16-bit service UUIDs
