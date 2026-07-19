@@ -1,6 +1,7 @@
 package hci
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -108,6 +109,11 @@ type HCI struct {
 	// drop is counted (see AdvDropped).
 	chAdv      chan *Advertisement
 	advDropped atomic.Uint64
+
+	// srOrphaned counts scan-response reports that matched no AD in the
+	// scan history (see handleLEAdvertisingReport); each one is dropped
+	// without disturbing the other reports in the same HCI event.
+	srOrphaned atomic.Uint64
 
 	// aclDropped counts inbound ACL data packets dropped because the
 	// owning connection's chInPkt was full (see handleACL); each drop
@@ -220,12 +226,10 @@ func (h *HCI) setErrIfAbsent(err error) {
 }
 
 // Option sets the options specified.
+// Option applies every option and reports all failures joined, so an
+// option that succeeds after a failing one no longer masks the error.
 func (h *HCI) Option(opts ...ble.Option) error {
-	var err error
-	for _, opt := range opts {
-		err = opt(h)
-	}
-	return err
+	return ble.ApplyOptions(h, opts...)
 }
 
 func (h *HCI) init() error {
@@ -592,11 +596,20 @@ func (h *HCI) handleLEMeta(b []byte) error {
 	return fmt.Errorf("unsupported LE event: % X", b)
 }
 
+// errOrphanScanRsp reports that an LE Advertising Report event carried at
+// least one scan response with no matching Advertising Data packet in the
+// scan history. It is a shared sentinel — returned once per event, after
+// every report in the event has been processed — so the orphan surfaces in
+// sktLoop's log without a per-report fmt.Errorf allocation on the hot scan
+// path (see also SROrphaned).
+var errOrphanScanRsp = errors.New("hci: received scan response with no associated Advertising Data packet")
+
 func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 	if h.advHandler == nil {
 		return nil
 	}
 
+	var orphanErr error
 	e := evt.LEAdvertisingReport(b)
 	for i := 0; i < int(e.NumReports()); i++ {
 		var a *Advertisement
@@ -632,8 +645,13 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 				}
 			}
 			// Got a SR without having received an associated AD before?
+			// Count it and keep going: the remaining reports in this HCI
+			// event are independent, and aborting here (the old behavior)
+			// dropped them all while allocating a fresh error per orphan.
 			if a == nil {
-				return fmt.Errorf("received scan response %s with no associated Advertising Data packet", sr.Addr())
+				h.srOrphaned.Add(1)
+				orphanErr = errOrphanScanRsp
+				continue
 			}
 		default:
 			a = newAdvertisement(e, i)
@@ -648,7 +666,7 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 		}
 	}
 
-	return nil
+	return orphanErr
 }
 
 // advDispatcher delivers advertising reports to the registered handler, one
@@ -672,6 +690,15 @@ func (h *HCI) advDispatcher() {
 // with the scan rate.
 func (h *HCI) AdvDropped() uint64 {
 	return h.advDropped.Load()
+}
+
+// SROrphaned returns the number of scan-response reports dropped because no
+// matching Advertising Data packet was found in the scan history (typically
+// the AD was evicted from the bounded history, or scanning started mid
+// AD/SR exchange). Orphans are counted per report and never prevent the
+// remaining reports in the same HCI event from being processed.
+func (h *HCI) SROrphaned() uint64 {
+	return h.srOrphaned.Load()
 }
 
 func (h *HCI) handleCommandComplete(b []byte) error {
@@ -726,27 +753,31 @@ func (h *HCI) handleCommandStatus(b []byte) error {
 
 func (h *HCI) handleLEConnectionComplete(b []byte) error {
 	e := evt.LEConnectionComplete(b)
-	if e.Role() == roleMaster && e.Status() != 0x00 {
-		if ErrCommand(e.Status()) == ErrConnID {
+	if e.Status() != 0x00 {
+		if e.Role() == roleMaster && ErrCommand(e.Status()) == ErrConnID {
 			// The connection was canceled successfully.
 			return nil
 		}
 		// The connect failed (e.g. 0x3E connection failed to be
-		// established). Don't create or register a Conn: the handle is
-		// junk, no disconnect event will ever arrive for it, and the
-		// Conn (with its recombine goroutine and buffers) would sit in
-		// h.conns forever. chMasterConn deliberately gets nothing:
-		// gap.go's Dial keeps waiting and surfaces the failure through
-		// its context/dialerTmo timeout rather than failing fast.
-		ble.Logger.Warn("hci: connection failed to establish", "status", ErrCommand(e.Status()).Error())
+		// established). For either role, don't create or register a
+		// Conn: the handle is junk, no disconnect event will ever
+		// arrive for it, and the Conn (with its recombine goroutine
+		// and buffers) would sit in h.conns forever. chMasterConn and
+		// chSlaveConn deliberately get nothing: gap.go's Dial keeps
+		// waiting and surfaces the failure through its context or
+		// dialerTmo timeout, and Accept keeps listening for the next
+		// inbound connection. connectedHandler is not invoked either —
+		// it used to fire for failed slave connects, handing the
+		// application an event for a connection that never existed.
+		ble.Logger.Warn("hci: connection failed to establish", "role", e.Role(), "status", ErrCommand(e.Status()).Error())
 		return nil
 	}
+	// Status is 0x00 from here on (failures returned above).
 	c := newConn(h, e)
 	h.muConns.Lock()
 	h.conns[e.ConnectionHandle()] = c
 	h.muConns.Unlock()
 	if e.Role() == roleMaster {
-		// Status is 0x00 here (failures returned above).
 		select {
 		case h.chMasterConn <- c:
 		default:
@@ -754,23 +785,32 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 		}
 		return nil
 	}
-	if e.Status() == 0x00 {
-		h.chSlaveConn <- c
-		// When a controller accepts a connection, it moves from advertising
-		// state to idle/ready state. Host needs to explicitly ask the
-		// controller to re-enable advertising. Note that the host was most
-		// likely in advertising state. Otherwise it couldn't accept the
-		// connection in the first place. The only exception is that user
-		// asked the host to stop advertising during this tiny window.
-		// The re-enabling might failed or ignored by the controller, if
-		// it had reached the maximum number of concurrent connections.
-		// So we also re-enable the advertising when a connection disconnected
-		h.params.RLock()
-		if h.params.advEnable.AdvertisingEnable == 1 {
-			go h.Send(&cmd.LESetAdvertiseEnable{AdvertisingEnable: 0}, nil)
-		}
-		h.params.RUnlock()
+	// Slave (peripheral) role. The hand-off must be non-blocking for the
+	// same reason as the master path above: this runs on sktLoop, and with
+	// no Accept() pending a blocking send would wedge the whole adapter.
+	// With no listener the connection is refused cleanly instead — Close
+	// sends a Disconnect command (from its own goroutine; only sktLoop can
+	// process its completion), and the disconnect event finishes the
+	// teardown of the registered conn.
+	select {
+	case h.chSlaveConn <- c:
+	default:
+		go c.Close()
 	}
+	// When a controller accepts a connection, it moves from advertising
+	// state to idle/ready state. Host needs to explicitly ask the
+	// controller to re-enable advertising. Note that the host was most
+	// likely in advertising state. Otherwise it couldn't accept the
+	// connection in the first place. The only exception is that user
+	// asked the host to stop advertising during this tiny window.
+	// The re-enabling might failed or ignored by the controller, if
+	// it had reached the maximum number of concurrent connections.
+	// So we also re-enable the advertising when a connection disconnected
+	h.params.RLock()
+	if h.params.advEnable.AdvertisingEnable == 1 {
+		go h.Send(&cmd.LESetAdvertiseEnable{AdvertisingEnable: 0}, nil)
+	}
+	h.params.RUnlock()
 	if h.connectedHandler != nil {
 		h.connectedHandler(e)
 	}
@@ -845,10 +885,22 @@ func (h *HCI) handleNumberOfCompletedPackets(b []byte) error {
 }
 
 func (h *HCI) handleLELongTermKeyRequest(b []byte) error {
-	e := evt.LELongTermKeyRequest(b)
-	return h.Send(&cmd.LELongTermKeyRequestNegativeReply{
-		ConnectionHandle: e.ConnectionHandle(),
-	}, nil)
+	// No LTK is stored (encryption is unsupported), so refuse the request.
+	// The reply must NOT be sent synchronously: h.Send blocks until the
+	// command's completion event, which only sktLoop — the goroutine
+	// running this handler — can process. A synchronous Send self-stalls
+	// for the full cmdTimeout and then surfaces a bogus command-timeout
+	// failure. Send from a fresh goroutine instead, like
+	// handleDisconnectionComplete's re-advertise path, and log any error.
+	handle := evt.LELongTermKeyRequest(b).ConnectionHandle()
+	go func() {
+		if err := h.Send(&cmd.LELongTermKeyRequestNegativeReply{
+			ConnectionHandle: handle,
+		}, nil); err != nil {
+			ble.Logger.Error("hci: LE long term key negative reply failed", "handle", handle, "err", err)
+		}
+	}()
+	return nil
 }
 
 func (h *HCI) setAllowedCommands(n int) {

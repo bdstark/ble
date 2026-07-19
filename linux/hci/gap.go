@@ -3,6 +3,7 @@ package hci
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -64,16 +65,17 @@ func (h *HCI) AdvertiseAdv(a ble.Advertisement) error {
 		}
 	}
 	sr, _ := adv.NewPacket()
-	if a.LocalName() != "" {
+	// One call each: LocalName/ManufacturerData are interface calls whose
+	// implementations may walk and allocate per invocation.
+	if name := a.LocalName(); name != "" {
 		switch {
-		case ad.Append(adv.CompleteName(a.LocalName())) == nil:
-		case sr.Append(adv.CompleteName(a.LocalName())) == nil:
-		case sr.Append(adv.ShortName(a.LocalName())) == nil:
+		case ad.Append(adv.CompleteName(name)) == nil:
+		case sr.Append(adv.CompleteName(name)) == nil:
+		case sr.Append(adv.ShortName(name)) == nil:
 		}
 	}
 
-	if a.ManufacturerData() != nil {
-		man := a.ManufacturerData()
+	if man := a.ManufacturerData(); man != nil {
 		id := binary.LittleEndian.Uint16(man[0:2])
 		manufacuturerData := adv.ManufacturerData(id, man[2:])
 		switch {
@@ -82,7 +84,7 @@ func (h *HCI) AdvertiseAdv(a ble.Advertisement) error {
 		}
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), sr.Bytes()); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 
@@ -121,7 +123,7 @@ func (h *HCI) AdvertiseNameAndServices(name string, uuids ...ble.UUID) error {
 	case sr.Append(adv.ShortName(name)) == nil:
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), sr.Bytes()); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 }
@@ -133,7 +135,7 @@ func (h *HCI) AdvertiseMfgData(id uint16, md []byte) error {
 		return err
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), nil); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 }
@@ -145,7 +147,7 @@ func (h *HCI) AdvertiseServiceData16(id uint16, b []byte) error {
 		return err
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), nil); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 }
@@ -157,7 +159,7 @@ func (h *HCI) AdvertiseIBeaconData(md []byte) error {
 		return err
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), nil); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 }
@@ -169,7 +171,7 @@ func (h *HCI) AdvertiseIBeacon(u ble.UUID, major, minor uint16, pwr int8) error 
 		return err
 	}
 	if err := h.SetAdvertisement(ad.Bytes(), nil); err != nil {
-		return nil
+		return err
 	}
 	return h.Advertise()
 }
@@ -216,15 +218,36 @@ func (h *HCI) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 
 	select {
 	case <-ctx.Done():
-		return h.cancelDial()
+		return h.cancelDialWithCause(ctx.Err())
 	case <-tmo:
-		return h.cancelDial()
+		return h.cancelDialWithCause(fmt.Errorf("dialer timed out after %v: %w", h.dialerTmo, context.DeadlineExceeded))
 	case <-h.done:
 		return nil, h.Error()
 	case c := <-h.chMasterConn:
 		return gatt.NewClient(c)
 
 	}
+}
+
+// errDialCanceled marks the successful-cancel outcome of cancelDial: the
+// pending connection was canceled on request, no connection exists. Defined
+// here rather than error.go because gap.go's dial path is the only producer;
+// Dial wraps it with the reason the dial ended (ctx.Err() or the dialer
+// timeout) so callers can tell a requested cancel from a failure with
+// errors.Is(err, context.Canceled) / errors.Is(err, context.DeadlineExceeded).
+var errDialCanceled = errors.New("hci: connection canceled")
+
+// cancelDialWithCause cancels the pending dial like cancelDial and, when the
+// cancel itself succeeded, wraps cause — why the dial ended — so it is
+// errors.Is-reachable from the returned error. Any other cancelDial outcome
+// (connection actually completed, transport death, cancel failure) passes
+// through untouched.
+func (h *HCI) cancelDialWithCause(cause error) (ble.Client, error) {
+	cln, err := h.cancelDial()
+	if errors.Is(err, errDialCanceled) {
+		return nil, fmt.Errorf("%w: %w", errDialCanceled, cause)
+	}
+	return cln, err
 }
 
 // connCancelTimeout bounds the wait for the connection-complete event after
@@ -237,7 +260,7 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 	err := h.Send(&h.params.connCancel, nil)
 	if err == nil {
 		// The pending connection was canceled successfully.
-		return nil, fmt.Errorf("connection canceled")
+		return nil, errDialCanceled
 	}
 	// The connection has been established, the cancel command
 	// failed with ErrDisallowed.

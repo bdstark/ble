@@ -35,6 +35,9 @@ type Advertisement struct {
 
 	// cached packets.
 	p *adv.Packet
+
+	// cached Addr() result (see Addr).
+	addr ble.Addr
 }
 
 // setScanResponse ssociate sca response to the existing advertisement.
@@ -58,10 +61,12 @@ func (a *Advertisement) packets() *adv.Packet {
 
 // LocalName returns the LocalName of the remote peripheral.
 func (a *Advertisement) LocalName() string {
-	if a.packets().LocalName() != "" {
-		return a.packets().LocalName()
+	// One walk per source: each adv.Packet.LocalName() call re-walks the
+	// TLV fields and allocates a fresh string.
+	if name := a.packets().LocalName(); name != "" {
+		return name
 	}
-	if a.sr != nil && a.sr.LocalName() != "" {
+	if a.sr != nil {
 		return a.sr.LocalName()
 	}
 	return ""
@@ -109,13 +114,27 @@ func (a *Advertisement) RSSI() int {
 }
 
 // Addr returns the address of the remote peripheral.
+//
+// The result is computed once and cached: the conversion from the
+// little-endian wire address allocates a 6-byte slice plus an interface box,
+// and app-side scan filters call Addr on every report. The unguarded lazy
+// write is race-free for the same reason packets' cache is: handlers run on
+// the single adv dispatcher goroutine, and paired AD+SR advertisements are
+// built fresh rather than mutated in place (see handleLEAdvertisingReport).
+// The address comes from the immutable event buffer (a scan response is
+// paired by equal address), so the cache never needs invalidation.
 func (a *Advertisement) Addr() ble.Addr {
+	if a.addr != nil {
+		return a.addr
+	}
 	b := a.e.Address(a.i)
 	addr := net.HardwareAddr([]byte{b[5], b[4], b[3], b[2], b[1], b[0]})
 	if a.e.AddressType(a.i) == 1 {
-		return RandomAddress{addr}
+		a.addr = RandomAddress{addr}
+	} else {
+		a.addr = addr
 	}
-	return addr
+	return a.addr
 }
 
 // EventType returns the event type of Advertisement.
