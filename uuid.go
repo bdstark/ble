@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -21,7 +22,7 @@ func UUID16(i uint16) UUID {
 // Parse parses a standard-format UUID string, such
 // as "1800" or "34DA3AD1-7110-41A1-B1EF-4430F509CDE7".
 func Parse(s string) (UUID, error) {
-	s = strings.Replace(s, "-", "", -1)
+	s = strings.ReplaceAll(s, "-", "")
 	b, err := hex.DecodeString(s)
 	if err != nil {
 		return nil, err
@@ -75,23 +76,14 @@ func (u UUID) Equal(v UUID) bool {
 // for its obvious use. Call sites that want filter semantics must check for
 // the nil filter themselves (as the discovery code in linux/gatt does).
 func Contains(s []UUID, u UUID) bool {
-	for _, a := range s {
-		if a.Equal(u) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(s, u.Equal)
 }
 
 // Reverse returns a reversed copy of u.
 func Reverse(u []byte) []byte {
-	l := len(u)
-	b := make([]byte, l)
-
-	for i := 0; i < l; i++ {
-		b[l-i-1] = u[i]
-	}
+	b := make([]byte, len(u))
+	copy(b, u)
+	slices.Reverse(b)
 
 	return b
 }

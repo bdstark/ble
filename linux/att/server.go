@@ -231,11 +231,11 @@ func (s *Server) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 		// Apply the txMTU afer this response has been sent and before
 		// any other attribute protocol PDU is sent.
 		defer func() {
-			s.txBuf = make([]byte, txMTU, txMTU)
+			s.txBuf = make([]byte, txMTU)
 			<-s.chNotBuf
-			s.chNotBuf <- make([]byte, txMTU, txMTU)
+			s.chNotBuf <- make([]byte, txMTU)
 			<-s.chIndBuf
-			s.chIndBuf <- make([]byte, txMTU, txMTU)
+			s.chIndBuf <- make([]byte, txMTU)
 		}()
 	}
 
@@ -519,13 +519,7 @@ func (s *Server) handleReadByGroupRequest(r ReadByGroupTypeRequest) []byte {
 			v = buf2.Bytes()
 		}
 		if dlen == 0 {
-			dlen = 4 + len(v)
-			if dlen > 255 {
-				dlen = 255
-			}
-			if dlen > len(list) {
-				dlen = len(list)
-			}
+			dlen = min(4+len(v), 255, len(list))
 			rsp.SetLength(uint8(dlen))
 		} else if 4+len(v) != dlen {
 			break

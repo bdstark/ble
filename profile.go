@@ -37,7 +37,7 @@ type Profile struct {
 
 // Find searches discovered profile for the specified target's type and UUID.
 // The target must has the type of *Service, *Characteristic, or *Descriptor.
-func (p *Profile) Find(target interface{}) interface{} {
+func (p *Profile) Find(target any) any {
 	switch t := target.(type) {
 	case *Service:
 		return p.FindService(t)

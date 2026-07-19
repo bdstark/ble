@@ -8,7 +8,7 @@ import (
 // prevent deadlock in the case of spurious events, eventSlot discards incoming
 // signals if it is not explicitly listening for them.
 type eventSlot struct {
-	ch  chan interface{}
+	ch  chan any
 	mtx sync.Mutex
 }
 
@@ -35,7 +35,7 @@ func (e *eventSlot) Close() {
 
 // Listen listens for a single event on this slot.  It returns the channel on
 // which the event will be received.
-func (e *eventSlot) Listen() chan interface{} {
+func (e *eventSlot) Listen() chan any {
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
 
@@ -43,14 +43,14 @@ func (e *eventSlot) Listen() chan interface{} {
 		e.closeNoLock()
 	}
 
-	e.ch = make(chan interface{})
+	e.ch = make(chan any)
 	return e.ch
 }
 
 // RxSignal causes the event slot to process the given signal (i.e., it sends a
 // signal to the slot).  It blocks until the signal is consumed by a client or
 // until the slot is closed.
-func (e *eventSlot) RxSignal(sig interface{}) {
+func (e *eventSlot) RxSignal(sig any) {
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
 

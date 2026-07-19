@@ -122,7 +122,7 @@ func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU 
 		c.l2c.SetTxMTU(txMTU)
 		// Put a re-allocated txBuf back to the channel.
 		// The txBuf has been captured in deferred function.
-		txBuf = make([]byte, txMTU, txMTU)
+		txBuf = make([]byte, txMTU)
 	}
 
 	return txMTU, nil
@@ -550,7 +550,7 @@ func (c *Client) RspDropped() uint64 {
 // Response PDUs are deliberately NOT pooled: sendReq hands them to the
 // request methods, which return aliasing sub-slices (e.g. Read returns
 // rsp.AttributeValue()) to callers with unbounded lifetime.
-var pduPool = sync.Pool{New: func() interface{} {
+var pduPool = sync.Pool{New: func() any {
 	b := make([]byte, ble.MaxMTU)
 	return &b
 }}
@@ -688,7 +688,7 @@ func (c *Client) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 	defer func() {
 		// Update the tx buffer if needed
 		if len(txBuf) != txMTU {
-			c.chTxBuf <- make([]byte, txMTU, txMTU)
+			c.chTxBuf <- make([]byte, txMTU)
 		} else {
 			c.chTxBuf <- txBuf
 		}
