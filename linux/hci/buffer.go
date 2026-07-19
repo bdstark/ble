@@ -67,9 +67,9 @@ func (c *Client) GetTimeout(done <-chan struct{}, d time.Duration) (*bytes.Buffe
 		c.sent <- b
 		return b, nil
 	case <-done:
-		return nil, fmt.Errorf("hci: connection closed while waiting for ACL buffer")
+		return nil, fmt.Errorf("connection closed while waiting for ACL buffer: %w", ErrClosed)
 	case <-time.After(d):
-		return nil, fmt.Errorf("hci: timed out waiting for ACL buffer credits (dead connection?)")
+		return nil, ErrCreditTimeout
 	}
 }
 

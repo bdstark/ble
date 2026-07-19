@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"errors"
 	"github.com/go-ble/ble"
-	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
 
@@ -42,11 +42,11 @@ func doDiscover(c *cli.Context) error {
 }
 
 func chkErr(err error) error {
-	switch errors.Cause(err) {
-	case context.DeadlineExceeded:
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		// Sepcified duration passed, which is the expected case.
 		return nil
-	case context.Canceled:
+	case errors.Is(err, context.Canceled):
 		fmt.Printf("\n(Canceled)\n")
 		return nil
 	}

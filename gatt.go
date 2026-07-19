@@ -2,11 +2,11 @@ package ble
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/pkg/errors"
 )
 
 // ErrDefaultDevice ...
@@ -140,12 +140,15 @@ func Connect(ctx context.Context, f AdvFilter) (Client, error) {
 	}
 	if err := Scan(ctx2, false, fn, f); err != nil {
 		if err != context.Canceled {
-			return nil, errors.Wrap(err, "can't scan")
+			return nil, fmt.Errorf("can't scan: %w", err)
 		}
 	}
 
 	cln, err := Dial(ctx, (<-ch).Addr())
-	return cln, errors.Wrap(err, "can't dial")
+	if err != nil {
+		return nil, fmt.Errorf("can't dial: %w", err)
+	}
+	return cln, nil
 }
 
 // A NotificationHandler handles notification or indication from a server.

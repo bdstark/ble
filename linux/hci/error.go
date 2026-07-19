@@ -1,6 +1,10 @@
 package hci
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"io"
+)
 
 // errors
 var (
@@ -9,6 +13,24 @@ var (
 	ErrBusyDialing     = errors.New("busy dialing")
 	ErrBusyListening   = errors.New("busy listening")
 	ErrInvalidAddr     = errors.New("invalid address")
+
+	// ErrClosed is returned for operations on a connection or HCI
+	// transport that is closed (or closes while the operation waits).
+	// It wraps io.ErrClosedPipe, so errors.Is(err, io.ErrClosedPipe)
+	// keeps working for callers that historically checked that.
+	ErrClosed = fmt.Errorf("hci: closed: %w", io.ErrClosedPipe)
+
+	// ErrCreditTimeout is returned when a write gives up waiting for
+	// ACL buffer credits from the controller (see ACLWriteTimeout).
+	// Credits only come back via NumberOfCompletedPackets events; a
+	// link that died without a processed disconnect event never
+	// returns them.
+	ErrCreditTimeout = errors.New("hci: timed out waiting for ACL buffer credits (dead connection?)")
+
+	// ErrCommandTimeout is returned when the controller stops
+	// completing HCI commands: either no command buffer becomes
+	// available or a sent command never receives a response.
+	ErrCommandTimeout = errors.New("hci: timed out waiting for command response (controller wedged?)")
 )
 
 // HCI Command Errors  [Vol2, Part D, 1.3 ]

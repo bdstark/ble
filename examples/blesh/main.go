@@ -13,7 +13,7 @@ import (
 	"github.com/go-ble/ble/examples/lib"
 	"github.com/go-ble/ble/examples/lib/dev"
 	"github.com/go-ble/ble/linux"
-	"github.com/pkg/errors"
+
 	"github.com/urfave/cli"
 )
 
@@ -157,14 +157,14 @@ func setup(c *cli.Context) error {
 	fmt.Printf("Initializing device ...\n")
 	d, err := dev.NewDevice("default")
 	if err != nil {
-		return errors.Wrap(err, "can't new device")
+		return fmt.Errorf("can't new device: %w", err)
 	}
 	ble.SetDefaultDevice(d)
 	curr.device = d
 
 	// Optinal. Demostrate changing HCI parameters on Linux.
 	if dev, ok := d.(*linux.Device); ok {
-		return errors.Wrap(updateLinuxParam(dev), "can't update hci parameters")
+		return wrapErr(updateLinuxParam(dev), "can't update hci parameters")
 	}
 
 	return nil
@@ -219,7 +219,7 @@ func cmdServe(c *cli.Context) error {
 	testSvc.AddCharacteristic(lib.NewEchoChar())
 
 	if err := ble.AddService(testSvc); err != nil {
-		return errors.Wrap(err, "can't add service")
+		return fmt.Errorf("can't add service: %w", err)
 	}
 
 	fmt.Printf("Serving GATT Server for %s...\n", c.Duration("tmo"))
@@ -285,14 +285,14 @@ func cmdDiscover(c *cli.Context) error {
 	curr.profile = nil
 	if curr.client == nil {
 		if err := cmdConnect(c); err != nil {
-			return errors.Wrap(err, "can't connect")
+			return fmt.Errorf("can't connect: %w", err)
 		}
 	}
 
 	fmt.Printf("Discovering profile...\n")
 	p, err := curr.client.DiscoverProfile(context.Background(), true)
 	if err != nil {
-		return errors.Wrap(err, "can't discover profile")
+		return fmt.Errorf("can't discover profile: %w", err)
 	}
 
 	curr.profile = p
@@ -302,12 +302,12 @@ func cmdDiscover(c *cli.Context) error {
 func cmdExplore(c *cli.Context) error {
 	if curr.client == nil {
 		if err := cmdConnect(c); err != nil {
-			return errors.Wrap(err, "can't connect")
+			return fmt.Errorf("can't connect: %w", err)
 		}
 	}
 	if curr.profile == nil {
 		if err := cmdDiscover(c); err != nil {
-			return errors.Wrap(err, "can't discover profile")
+			return fmt.Errorf("can't discover profile: %w", err)
 		}
 	}
 	return explore(curr.client, curr.profile)
@@ -326,7 +326,7 @@ func cmdRead(c *cli.Context) error {
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
 		b, err := curr.client.ReadCharacteristic(context.Background(), u.(*ble.Characteristic))
 		if err != nil {
-			return errors.Wrap(err, "can't read characteristic")
+			return fmt.Errorf("can't read characteristic: %w", err)
 		}
 		fmt.Printf("    Value         %x | %q\n", b, b)
 		return nil
@@ -334,7 +334,7 @@ func cmdRead(c *cli.Context) error {
 	if u := curr.profile.Find(ble.NewDescriptor(curr.uuid)); u != nil {
 		b, err := curr.client.ReadDescriptor(context.Background(), u.(*ble.Descriptor))
 		if err != nil {
-			return errors.Wrap(err, "can't read descriptor")
+			return fmt.Errorf("can't read descriptor: %w", err)
 		}
 		fmt.Printf("    Value         %x | %q\n", b, b)
 		return nil
@@ -354,11 +354,11 @@ func cmdWrite(c *cli.Context) error {
 	}
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
 		err := curr.client.WriteCharacteristic(context.Background(), u.(*ble.Characteristic), []byte("hello"), true)
-		return errors.Wrap(err, "can't write characteristic")
+		return wrapErr(err, "can't write characteristic")
 	}
 	if u := curr.profile.Find(ble.NewDescriptor(curr.uuid)); u != nil {
 		err := curr.client.WriteDescriptor(context.Background(), u.(*ble.Descriptor), []byte("fixme"))
-		return errors.Wrap(err, "can't write descriptor")
+		return wrapErr(err, "can't write descriptor")
 	}
 	return errNoUUID
 }
@@ -377,7 +377,7 @@ func cmdSub(c *cli.Context) error {
 	h := func(req []byte) { fmt.Printf("notified: %x | %q\n", req, req) }
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
 		err := curr.client.Subscribe(context.Background(), u.(*ble.Characteristic), c.Bool("ind"), h)
-		return errors.Wrap(err, "can't subscribe to characteristic")
+		return wrapErr(err, "can't subscribe to characteristic")
 	}
 	return errNoUUID
 }
@@ -391,7 +391,7 @@ func cmdUnsub(c *cli.Context) error {
 	}
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
 		err := curr.client.Unsubscribe(context.Background(), u.(*ble.Characteristic), c.Bool("ind"))
-		return errors.Wrap(err, "can't unsubscribe to characteristic")
+		return wrapErr(err, "can't unsubscribe to characteristic")
 	}
 	return errNoUUID
 }
@@ -420,4 +420,12 @@ func cmdShell(app *cli.App) {
 		app.Run(append(os.Args[1:], strings.Split(text, " ")...))
 	}
 	signal.Stop(sigs)
+}
+
+// wrapErr annotates err, passing a nil error through unchanged.
+func wrapErr(err error, msg string) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+	return nil
 }

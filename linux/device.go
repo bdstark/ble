@@ -4,11 +4,12 @@ import (
 	"context"
 	"io"
 
+	"fmt"
+
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/att"
 	"github.com/go-ble/ble/linux/gatt"
 	"github.com/go-ble/ble/linux/hci"
-	"github.com/pkg/errors"
 )
 
 // NewDevice returns the default HCI device.
@@ -24,24 +25,24 @@ func NewDeviceWithName(name string, opts ...ble.Option) (*Device, error) {
 func NewDeviceWithNameAndHandler(name string, handler ble.NotifyHandler, opts ...ble.Option) (*Device, error) {
 	dev, err := hci.NewHCI(opts...)
 	if err != nil {
-		return nil, errors.Wrap(err, "can't create hci")
+		return nil, fmt.Errorf("can't create hci: %w", err)
 	}
 	if err = dev.Init(); err != nil {
 		dev.Close()
-		return nil, errors.Wrap(err, "can't init hci")
+		return nil, fmt.Errorf("can't init hci: %w", err)
 	}
 
 	srv, err := gatt.NewServerWithNameAndHandler(name, handler)
 	if err != nil {
 		dev.Close()
-		return nil, errors.Wrap(err, "can't create server")
+		return nil, fmt.Errorf("can't create server: %w", err)
 	}
 
 	// mtu := ble.DefaultMTU
 	mtu := ble.MaxMTU // TODO: get this from user using Option.
 	if mtu > ble.MaxMTU {
 		dev.Close()
-		return nil, errors.Wrapf(err, "maximum ATT_MTU is %d", ble.MaxMTU)
+		return nil, fmt.Errorf("maximum ATT_MTU is %d", ble.MaxMTU)
 	}
 
 	go loop(dev, srv, mtu)
@@ -212,7 +213,10 @@ func (d *Device) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	// d.HCI.Dial is a blocking call, although most of time it should return immediately.
 	// But in case passing wrong device address or the device went non-connectable, it blocks.
 	cln, err := d.HCI.Dial(ctx, a)
-	return cln, errors.Wrap(err, "can't dial")
+	if err != nil {
+		return nil, fmt.Errorf("can't dial: %w", err)
+	}
+	return cln, nil
 }
 
 // Address returns the listener's device address.

@@ -13,7 +13,6 @@ import (
 	"github.com/go-ble/ble/linux/hci/cmd"
 	"github.com/go-ble/ble/linux/hci/evt"
 	"github.com/go-ble/ble/linux/hci/socket"
-	"github.com/pkg/errors"
 )
 
 // Command ...
@@ -59,7 +58,7 @@ func NewHCI(opts ...ble.Option) (*HCI, error) {
 	}
 	h.params.init()
 	if err := h.Option(opts...); err != nil {
-		return nil, errors.Wrap(err, "can't set options")
+		return nil, fmt.Errorf("can't set options: %w", err)
 	}
 
 	return h, nil
@@ -271,9 +270,12 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	select {
 	case b = <-h.chCmdBufs:
 	case <-h.done:
-		return nil, h.err
+		if h.err != nil {
+			return nil, h.err
+		}
+		return nil, ErrClosed
 	case <-time.After(10 * time.Second):
-		err := fmt.Errorf("hci: no command buffer available (controller not completing commands)")
+		err := fmt.Errorf("no command buffer available (controller not completing commands): %w", ErrCommandTimeout)
 		h.close(err)
 		return nil, err
 	}
@@ -303,7 +305,7 @@ func (h *HCI) send(c Command) ([]byte, error) {
 	timeout := time.NewTimer(10 * time.Second)
 	select {
 	case <-timeout.C:
-		err = fmt.Errorf("hci: no response to command, hci connection failed")
+		err = fmt.Errorf("no response to command, hci connection failed: %w", ErrCommandTimeout)
 		ret = nil
 	case <-h.done:
 		err = h.err

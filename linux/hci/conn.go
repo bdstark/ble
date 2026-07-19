@@ -12,7 +12,6 @@ import (
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
 	"github.com/go-ble/ble/linux/hci/evt"
-	"github.com/pkg/errors"
 )
 
 // ACLWriteTimeout bounds how long a write waits for ACL buffer
@@ -127,10 +126,10 @@ func (c *Conn) SetContext(ctx context.Context) {
 func (c *Conn) Read(sdu []byte) (n int, err error) {
 	p, ok := <-c.chInPDU
 	if !ok {
-		return 0, errors.Wrap(io.ErrClosedPipe, "input channel closed")
+		return 0, fmt.Errorf("input channel closed: %w", ErrClosed)
 	}
 	if len(p) == 0 {
-		return 0, errors.Wrap(io.ErrUnexpectedEOF, "received empty packet")
+		return 0, fmt.Errorf("received empty packet: %w", io.ErrUnexpectedEOF)
 	}
 
 	// Assume it's a B-Frame.
@@ -142,7 +141,7 @@ func (c *Conn) Read(sdu []byte) (n int, err error) {
 		data = leFrameHdr(p).payload()
 	}
 	if cap(sdu) < slen {
-		return 0, errors.Wrapf(io.ErrShortBuffer, "payload received exceeds sdu buffer")
+		return 0, fmt.Errorf("payload received exceeds sdu buffer: %w", io.ErrShortBuffer)
 	}
 	buf := bytes.NewBuffer(sdu)
 	buf.Reset()
@@ -157,7 +156,7 @@ func (c *Conn) Read(sdu []byte) (n int, err error) {
 // Write breaks down a L2CAP SDU into segmants [Vol 3, Part A, 7.3.1]
 func (c *Conn) Write(sdu []byte) (int, error) {
 	if len(sdu) > c.txMTU {
-		return 0, errors.Wrap(io.ErrShortWrite, "payload exceeds mtu")
+		return 0, fmt.Errorf("payload exceeds mtu: %w", io.ErrShortWrite)
 	}
 
 	plen := len(sdu)
@@ -210,7 +209,7 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 	// with handleDisconnectionComplete
 	select {
 	case <-c.chDone:
-		return 0, io.ErrClosedPipe
+		return 0, ErrClosed
 	default:
 	}
 
@@ -235,7 +234,7 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 		// Flush the pkt to HCI
 		select {
 		case <-c.chDone:
-			return 0, io.ErrClosedPipe
+			return 0, ErrClosed
 		default:
 		}
 

@@ -10,7 +10,6 @@ import (
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/adv"
 	"github.com/go-ble/ble/linux/gatt"
-	"github.com/pkg/errors"
 )
 
 // Addr ...
@@ -249,7 +248,7 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 			return nil, fmt.Errorf("hci: connection cancel disallowed but connection never arrived")
 		}
 	}
-	return nil, errors.Wrap(err, "cancel connection failed")
+	return nil, fmt.Errorf("cancel connection failed: %w", err)
 }
 
 // Advertise starts advertising.

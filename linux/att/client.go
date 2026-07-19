@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-ble/ble"
-	"github.com/pkg/errors"
 )
 
 // NotificationHandler handles notification or indication.
@@ -555,7 +554,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	default:
 	}
 	if _, err := c.l2c.Write(b); err != nil {
-		return nil, errors.Wrap(err, "send ATT request failed")
+		return nil, fmt.Errorf("send ATT request failed: %w", err)
 	}
 	for {
 		select {
@@ -573,14 +572,14 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			}
 			_, err := c.l2c.Write(errRsp)
 			if err != nil {
-				return nil, errors.Wrap(err, "unexpected ATT response received")
+				return nil, fmt.Errorf("unexpected ATT response received: %w", err)
 			}
 		case err := <-c.chErr:
-			return nil, errors.Wrap(err, "ATT request failed")
+			return nil, fmt.Errorf("ATT request failed: %w", err)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(30 * time.Second):
-			return nil, errors.Wrap(ErrSeqProtoTimeout, "ATT request timeout")
+			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
 		}
 	}
 }

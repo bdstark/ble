@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/examples/lib/dev"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -33,11 +33,11 @@ func main() {
 }
 
 func chkErr(err error) {
-	switch errors.Cause(err) {
-	case nil:
-	case context.DeadlineExceeded:
+	switch {
+	case err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
 		fmt.Printf("done\n")
-	case context.Canceled:
+	case errors.Is(err, context.Canceled):
 		fmt.Printf("canceled\n")
 	default:
 		log.Fatalf(err.Error())

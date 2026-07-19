@@ -1,10 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux"
 	"github.com/go-ble/ble/linux/hci/cmd"
-	"github.com/pkg/errors"
 )
 
 func updateLinuxParam(d *linux.Device) error {
@@ -18,7 +18,7 @@ func updateLinuxParam(d *linux.Device) error {
 		AdvertisingChannelMap:   0x7,       // 0x07 0x01: ch37, 0x2: ch38, 0x4: ch39
 		AdvertisingFilterPolicy: 0x00,
 	}, nil); err != nil {
-		return errors.Wrap(err, "can't set advertising param")
+		return fmt.Errorf("can't set advertising param: %w", err)
 	}
 
 	if err := d.HCI.Send(&cmd.LESetScanParameters{
@@ -28,7 +28,7 @@ func updateLinuxParam(d *linux.Device) error {
 		OwnAddressType:       0x00,   // 0x00: public, 0x01: random
 		ScanningFilterPolicy: 0x00,   // 0x00: accept all, 0x01: ignore non-white-listed.
 	}, nil); err != nil {
-		return errors.Wrap(err, "can't set scan param")
+		return fmt.Errorf("can't set scan param: %w", err)
 	}
 
 	if err := d.HCI.Option(ble.OptConnParams(
@@ -46,7 +46,7 @@ func updateLinuxParam(d *linux.Device) error {
 			MinimumCELength:       0x0000,    // 0x0000 - 0xFFFF; N * 0.625 msec
 			MaximumCELength:       0x0000,    // 0x0000 - 0xFFFF; N * 0.625 msec
 		})); err != nil {
-		return errors.Wrap(err, "can't set connection param")
+		return fmt.Errorf("can't set connection param: %w", err)
 	}
 	return nil
 }
