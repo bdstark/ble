@@ -41,6 +41,20 @@ func NewDevice(opts ...ble.Option) (*Device, error) {
 		conns: make(map[string]*conn),
 	}
 
+	// Apply options. Genuinely-unsupported ones (ErrUnsupportedOption) are
+	// logged and skipped so a cross-platform caller passing linux-only
+	// options (e.g. OptDialerTimeout) still gets a device; any other
+	// failure is fatal.
+	for _, opt := range opts {
+		if err := opt(d); err != nil {
+			if errors.Is(err, ble.ErrUnsupportedOption) {
+				ble.Logger.Warn("darwin: ignoring option", "err", err)
+				continue
+			}
+			return nil, err
+		}
+	}
+
 	// Only proceed if Bluetooth is enabled.
 
 	blockUntilStateChange := func(getState func() cbgo.ManagerState) {
@@ -83,8 +97,11 @@ func NewDevice(opts ...ble.Option) (*Device, error) {
 }
 
 // Option sets the options specified.
+// Option applies every option and reports all failures joined. Unlike
+// NewDevice, an explicit Option call surfaces ErrUnsupportedOption to the
+// caller rather than skipping it.
 func (d *Device) Option(opts ...ble.Option) error {
-	return nil
+	return ble.ApplyOptions(d, opts...)
 }
 
 // Scan begins scanning for advertisements, calling h for every advertisement

@@ -1,11 +1,12 @@
 package hci
 
 import (
-	"errors"
-	"github.com/go-ble/ble/linux/hci/evt"
+	"fmt"
 	"time"
 
+	"github.com/go-ble/ble"
 	"github.com/go-ble/ble/linux/hci/cmd"
+	"github.com/go-ble/ble/linux/hci/evt"
 )
 
 // SetDeviceID sets HCI device ID.
@@ -56,12 +57,14 @@ func (h *HCI) SetAdvParams(param cmd.LESetAdvertisingParameters) error {
 	return nil
 }
 
-// SetPeripheralRole is not supported
+// SetPeripheralRole is not supported on the HCI backend; the role is fixed
+// by how the device is used. The error now propagates through Opt* closures
+// so callers find out instead of silently succeeding.
 func (h *HCI) SetPeripheralRole() error {
-	return errors.New("Not supported")
+	return fmt.Errorf("hci: SetPeripheralRole: %w", ble.ErrUnsupportedOption)
 }
 
-// SetCentralRole is not supported
+// SetCentralRole is not supported on the HCI backend; see SetPeripheralRole.
 func (h *HCI) SetCentralRole() error {
-	return errors.New("Not supported")
+	return fmt.Errorf("hci: SetCentralRole: %w", ble.ErrUnsupportedOption)
 }
