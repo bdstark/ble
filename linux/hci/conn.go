@@ -147,7 +147,14 @@ func (c *Conn) Read(sdu []byte) (n int, err error) {
 	buf.Reset()
 	buf.Write(data)
 	for buf.Len() < slen {
-		p := <-c.chInPDU
+		p, ok := <-c.chInPDU
+		if !ok {
+			// Disconnect closed chInPDU mid-reassembly. Without the ok
+			// check p is a nil pdu and p.payload() panics — a crash that
+			// took down the whole unattended gateway when a link died
+			// between fragments of a segmented SDU.
+			return 0, fmt.Errorf("input channel closed during reassembly: %w", ErrClosed)
+		}
 		buf.Write(p.payload())
 	}
 	return slen, nil

@@ -3,6 +3,8 @@ package hci
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
 )
 
@@ -54,5 +56,39 @@ func BenchmarkWriteACLDataBinaryWrite(b *testing.B) {
 		if err := binaryWriteACLData(pkt, 0x2040, payload); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// TestReadClosedMidReassembly pins the fix for a field crash: a disconnect
+// closes chInPDU while Read is collecting the remaining fragments of a
+// segmented SDU. The receive without an ok-check yielded a nil pdu whose
+// payload() panicked, taking down the whole process.
+func TestReadClosedMidReassembly(t *testing.T) {
+	c := &Conn{chInPDU: make(chan pdu, 1)}
+
+	// First fragment of an SDU that claims 10 payload bytes but carries 4:
+	// Read must loop for more fragments.
+	first := make(pdu, 4+4)
+	binary.LittleEndian.PutUint16(first[0:2], 10)       // dlen
+	binary.LittleEndian.PutUint16(first[2:4], cidLEAtt) // cid
+	c.chInPDU <- first
+	close(c.chInPDU) // disconnect before the continuation arrives
+
+	n, err := c.Read(make([]byte, 64))
+	if n != 0 || err == nil {
+		t.Fatalf("Read = (%d, %v), want (0, error)", n, err)
+	}
+	if !errors.Is(err, ErrClosed) || !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Read error %v must match ErrClosed and io.ErrClosedPipe", err)
+	}
+}
+
+// TestReadClosedBeforeFirstPDU covers the pre-existing guarded path for
+// completeness: closing before any PDU arrives must also error, not panic.
+func TestReadClosedBeforeFirstPDU(t *testing.T) {
+	c := &Conn{chInPDU: make(chan pdu)}
+	close(c.chInPDU)
+	if _, err := c.Read(make([]byte, 64)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Read error %v must match io.ErrClosedPipe", err)
 	}
 }
