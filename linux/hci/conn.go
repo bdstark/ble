@@ -466,6 +466,14 @@ func (c *Conn) ReadRSSI() (int, error) {
 //  5. Teardown racing registration: the chDone check under muUpdate below
 //     rejects a registration once teardown started; if chDone closes just
 //     after, the select's teardown arm handles it.
+//
+// The LE Connection Update Complete event carries only the handle, not a
+// command correlation ID, so in principle a completion that straggles in
+// after call A times out and call B has since registered would be read by
+// B as its own. This is inherent to the event and shared by every host
+// stack; here it is effectively unreachable — connUpdateTimeout (40s)
+// exceeds the 32s max supervision timeout, and ErrUpdateInProgress permits
+// only one update per link at a time.
 func (c *Conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
 	imin, imax, latency, timeout, err := p.Encode()
 	if err != nil {
