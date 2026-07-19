@@ -250,9 +250,10 @@ func TestLogDebugEnabled(t *testing.T) {
 }
 
 // TestHandleSignalMTUExceeded exercises handleSignal's oversized-command
-// path with debug logging on: the recv/send debug dumps run, and the failed
-// Command Reject (connection already closed) hits the send-response-failed
-// error log.
+// error path with debug logging on: the recv/send debug dumps run, and the
+// Command Reject send failing on the closed connection (writePDU returns
+// ErrClosed) hits the send-response-failed error log. The success path is
+// covered by TestHandleSignalMTUExceededSendsReject in signal_test.go.
 func TestHandleSignalMTUExceeded(t *testing.T) {
 	debugLogger(t)
 	c := &Conn{
@@ -270,8 +271,7 @@ func TestHandleSignalMTUExceeded(t *testing.T) {
 // TestHandleSignalDisconnectRequest drives handleSignal through a
 // well-formed Disconnect Request, whose Disconnect Response marshals
 // successfully — so sendResponse reaches its debug dump and the socket
-// write. (The Command Reject path can't get there: CommandReject.Marshal
-// always fails on its variable-length Data field.)
+// write.
 func TestHandleSignalDisconnectRequest(t *testing.T) {
 	debugLogger(t)
 	skt := newFakeSkt()

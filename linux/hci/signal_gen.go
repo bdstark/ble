@@ -3,6 +3,7 @@ package hci
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 )
 
 // SignalCommandReject is the code of Command Reject signaling packet.
@@ -18,17 +19,21 @@ type CommandReject struct {
 func (s CommandReject) Code() int { return 0x01 }
 
 // Marshal serializes the command parameters into binary form.
+// Hand-encoded: the variable-length Data field rules out binary.Write.
 func (s *CommandReject) Marshal() ([]byte, error) {
-	buf := bytes.NewBuffer(make([]byte, 0))
-	if err := binary.Write(buf, binary.LittleEndian, s); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	b := make([]byte, 2, 2+len(s.Data))
+	binary.LittleEndian.PutUint16(b, s.Reason)
+	return append(b, s.Data...), nil
 }
 
 // Unmarshal de-serializes the binary data and stores the result in the receiver.
 func (s *CommandReject) Unmarshal(b []byte) error {
-	return binary.Read(bytes.NewBuffer(b), binary.LittleEndian, s)
+	if len(b) < 2 {
+		return io.ErrUnexpectedEOF
+	}
+	s.Reason = binary.LittleEndian.Uint16(b)
+	s.Data = append([]byte(nil), b[2:]...)
+	return nil
 }
 
 // SignalDisconnectRequest is the code of Disconnect Request signaling packet.
