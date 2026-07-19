@@ -1,6 +1,7 @@
 package darwin
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/JuulLabs-OSS/cbgo"
@@ -57,21 +58,21 @@ func (cln *Client) Profile() *ble.Profile {
 }
 
 // DiscoverProfile discovers the whole hierarchy of a server.
-func (cln *Client) DiscoverProfile(force bool) (*ble.Profile, error) {
+func (cln *Client) DiscoverProfile(ctx context.Context, force bool) (*ble.Profile, error) {
 	if cln.profile != nil && !force {
 		return cln.profile, nil
 	}
-	ss, err := cln.DiscoverServices(nil)
+	ss, err := cln.DiscoverServices(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("can't discover services: %s", err)
 	}
 	for _, s := range ss {
-		cs, err := cln.DiscoverCharacteristics(nil, s)
+		cs, err := cln.DiscoverCharacteristics(ctx, nil, s)
 		if err != nil {
 			return nil, fmt.Errorf("can't discover characteristics: %s", err)
 		}
 		for _, c := range cs {
-			_, err := cln.DiscoverDescriptors(nil, c)
+			_, err := cln.DiscoverDescriptors(ctx, nil, c)
 			if err != nil {
 				return nil, fmt.Errorf("can't discover descriptors: %s", err)
 			}
@@ -83,7 +84,7 @@ func (cln *Client) DiscoverProfile(force bool) (*ble.Profile, error) {
 
 // DiscoverServices finds all the primary services on a server. [Vol 3, Part G, 4.4.1]
 // If filter is specified, only filtered services are returned.
-func (cln *Client) DiscoverServices(ss []ble.UUID) ([]*ble.Service, error) {
+func (cln *Client) DiscoverServices(ctx context.Context, ss []ble.UUID) ([]*ble.Service, error) {
 	ch := cln.conn.evl.svcsDiscovered.Listen()
 	defer cln.conn.evl.svcsDiscovered.Close()
 
@@ -95,6 +96,9 @@ func (cln *Client) DiscoverServices(ss []ble.UUID) ([]*ble.Service, error) {
 		if itf != nil {
 			return nil, itf.(error)
 		}
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
 
 	case <-cln.Disconnected():
 		return nil, fmt.Errorf("disconnected")
@@ -116,13 +120,13 @@ func (cln *Client) DiscoverServices(ss []ble.UUID) ([]*ble.Service, error) {
 
 // DiscoverIncludedServices finds the included services of a service. [Vol 3, Part G, 4.5.1]
 // If filter is specified, only filtered services are returned.
-func (cln *Client) DiscoverIncludedServices(ss []ble.UUID, s *ble.Service) ([]*ble.Service, error) {
+func (cln *Client) DiscoverIncludedServices(ctx context.Context, ss []ble.UUID, s *ble.Service) ([]*ble.Service, error) {
 	return nil, ble.ErrNotImplemented
 }
 
 // DiscoverCharacteristics finds all the characteristics within a service. [Vol 3, Part G, 4.6.1]
 // If filter is specified, only filtered characteristics are returned.
-func (cln *Client) DiscoverCharacteristics(cs []ble.UUID, s *ble.Service) ([]*ble.Characteristic, error) {
+func (cln *Client) DiscoverCharacteristics(ctx context.Context, cs []ble.UUID, s *ble.Service) ([]*ble.Characteristic, error) {
 	cbsvc, err := cln.pc.findCbSvc(s)
 	if err != nil {
 		return nil, err
@@ -139,6 +143,9 @@ func (cln *Client) DiscoverCharacteristics(cs []ble.UUID, s *ble.Service) ([]*bl
 		if itf != nil {
 			return nil, itf.(error)
 		}
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
 
 	case <-cln.Disconnected():
 		return nil, fmt.Errorf("disconnected")
@@ -157,7 +164,7 @@ func (cln *Client) DiscoverCharacteristics(cs []ble.UUID, s *ble.Service) ([]*bl
 
 // DiscoverDescriptors finds all the descriptors within a characteristic. [Vol 3, Part G, 4.7.1]
 // If filter is specified, only filtered descriptors are returned.
-func (cln *Client) DiscoverDescriptors(ds []ble.UUID, c *ble.Characteristic) ([]*ble.Descriptor, error) {
+func (cln *Client) DiscoverDescriptors(ctx context.Context, ds []ble.UUID, c *ble.Characteristic) ([]*ble.Descriptor, error) {
 	cbchr, err := cln.pc.findCbChr(c)
 	if err != nil {
 		return nil, err
@@ -167,15 +174,15 @@ func (cln *Client) DiscoverDescriptors(ds []ble.UUID, c *ble.Characteristic) ([]
 	defer cln.conn.evl.dscsDiscovered.Close()
 
 	cln.conn.prph.DiscoverDescriptors(cbchr)
-	if err != nil {
-		return nil, err
-	}
 
 	select {
 	case itf := <-ch:
 		if itf != nil {
 			return nil, itf.(error)
 		}
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
 
 	case <-cln.Disconnected():
 		return nil, fmt.Errorf("disconnected")
@@ -192,7 +199,7 @@ func (cln *Client) DiscoverDescriptors(ds []ble.UUID, c *ble.Characteristic) ([]
 }
 
 // ReadCharacteristic reads a characteristic value from a server. [Vol 3, Part G, 4.8.1]
-func (cln *Client) ReadCharacteristic(c *ble.Characteristic) ([]byte, error) {
+func (cln *Client) ReadCharacteristic(ctx context.Context, c *ble.Characteristic) ([]byte, error) {
 	cbchr, err := cln.pc.findCbChr(c)
 	if err != nil {
 		return nil, err
@@ -212,6 +219,9 @@ func (cln *Client) ReadCharacteristic(c *ble.Characteristic) ([]byte, error) {
 			return nil, itf.(error)
 		}
 
+	case <-ctx.Done():
+		return nil, ctx.Err()
+
 	case <-cln.Disconnected():
 		return nil, fmt.Errorf("disconnected")
 	}
@@ -222,12 +232,12 @@ func (cln *Client) ReadCharacteristic(c *ble.Characteristic) ([]byte, error) {
 }
 
 // ReadLongCharacteristic reads a characteristic value which is longer than the MTU. [Vol 3, Part G, 4.8.3]
-func (cln *Client) ReadLongCharacteristic(c *ble.Characteristic) ([]byte, error) {
-	return cln.ReadCharacteristic(c)
+func (cln *Client) ReadLongCharacteristic(ctx context.Context, c *ble.Characteristic) ([]byte, error) {
+	return cln.ReadCharacteristic(ctx, c)
 }
 
 // WriteCharacteristic writes a characteristic value to a server. [Vol 3, Part G, 4.9.3]
-func (cln *Client) WriteCharacteristic(c *ble.Characteristic, b []byte, noRsp bool) error {
+func (cln *Client) WriteCharacteristic(ctx context.Context, c *ble.Characteristic, b []byte, noRsp bool) error {
 	cbchr, err := cln.pc.findCbChr(c)
 	if err != nil {
 		return err
@@ -249,6 +259,9 @@ func (cln *Client) WriteCharacteristic(c *ble.Characteristic, b []byte, noRsp bo
 			return itf.(error)
 		}
 
+	case <-ctx.Done():
+		return ctx.Err()
+
 	case <-cln.Disconnected():
 		return fmt.Errorf("disconnected")
 	}
@@ -257,7 +270,7 @@ func (cln *Client) WriteCharacteristic(c *ble.Characteristic, b []byte, noRsp bo
 }
 
 // ReadDescriptor reads a characteristic descriptor from a server. [Vol 3, Part G, 4.12.1]
-func (cln *Client) ReadDescriptor(d *ble.Descriptor) ([]byte, error) {
+func (cln *Client) ReadDescriptor(ctx context.Context, d *ble.Descriptor) ([]byte, error) {
 	cbdsc, err := cln.pc.findCbDsc(d)
 	if err != nil {
 		return nil, err
@@ -274,6 +287,9 @@ func (cln *Client) ReadDescriptor(d *ble.Descriptor) ([]byte, error) {
 			return nil, itf.(error)
 		}
 
+	case <-ctx.Done():
+		return nil, ctx.Err()
+
 	case <-cln.Disconnected():
 		return nil, fmt.Errorf("disconnected")
 	}
@@ -284,7 +300,7 @@ func (cln *Client) ReadDescriptor(d *ble.Descriptor) ([]byte, error) {
 }
 
 // WriteDescriptor writes a characteristic descriptor to a server. [Vol 3, Part G, 4.12.3]
-func (cln *Client) WriteDescriptor(d *ble.Descriptor, b []byte) error {
+func (cln *Client) WriteDescriptor(ctx context.Context, d *ble.Descriptor, b []byte) error {
 	cbdsc, err := cln.pc.findCbDsc(d)
 	if err != nil {
 		return err
@@ -294,15 +310,15 @@ func (cln *Client) WriteDescriptor(d *ble.Descriptor, b []byte) error {
 	defer cln.conn.evl.dscWritten.Close()
 
 	cln.conn.prph.WriteDescriptor(b, cbdsc)
-	if err != nil {
-		return err
-	}
 
 	select {
 	case itf := <-ch:
 		if itf != nil {
 			return itf.(error)
 		}
+
+	case <-ctx.Done():
+		return ctx.Err()
 
 	case <-cln.Disconnected():
 		return fmt.Errorf("disconnected")
@@ -312,20 +328,21 @@ func (cln *Client) WriteDescriptor(d *ble.Descriptor, b []byte) error {
 }
 
 // ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-func (cln *Client) ReadRSSI() int {
+// The wait on the CoreBluetooth callback is bounded internally, not by ctx.
+func (cln *Client) ReadRSSI(ctx context.Context) int {
 	return cln.conn.ReadRSSI()
 }
 
 // ExchangeMTU set the ATT_MTU to the maximum possible value that can be
 // supported by both devices [Vol 3, Part G, 4.3.1]
-func (cln *Client) ExchangeMTU(mtu int) (int, error) {
+func (cln *Client) ExchangeMTU(ctx context.Context, mtu int) (int, error) {
 	// TODO: find the xpc command to tell OS X the rxMTU we can handle.
 	return cln.conn.TxMTU(), nil
 }
 
 // Subscribe subscribes to indication (if ind is set true), or notification of a
 // characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-func (cln *Client) Subscribe(c *ble.Characteristic, ind bool, fn ble.NotificationHandler) error {
+func (cln *Client) Subscribe(ctx context.Context, c *ble.Characteristic, ind bool, fn ble.NotificationHandler) error {
 	cbchr, err := cln.pc.findCbChr(c)
 	if err != nil {
 		return err
@@ -345,6 +362,10 @@ func (cln *Client) Subscribe(c *ble.Characteristic, ind bool, fn ble.Notificatio
 			return itf.(error)
 		}
 
+	case <-ctx.Done():
+		cln.conn.delSub(c)
+		return ctx.Err()
+
 	case <-cln.Disconnected():
 		cln.conn.delSub(c)
 		return fmt.Errorf("disconnected")
@@ -355,7 +376,7 @@ func (cln *Client) Subscribe(c *ble.Characteristic, ind bool, fn ble.Notificatio
 
 // Unsubscribe unsubscribes to indication (if ind is set true), or notification
 // of a specified characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-func (cln *Client) Unsubscribe(c *ble.Characteristic, ind bool) error {
+func (cln *Client) Unsubscribe(ctx context.Context, c *ble.Characteristic, ind bool) error {
 	cbchr, err := cln.pc.findCbChr(c)
 	if err != nil {
 		return err
@@ -372,6 +393,9 @@ func (cln *Client) Unsubscribe(c *ble.Characteristic, ind bool) error {
 			return itf.(error)
 		}
 
+	case <-ctx.Done():
+		return ctx.Err()
+
 	case <-cln.Disconnected():
 		return fmt.Errorf("disconnected")
 	}
@@ -382,9 +406,9 @@ func (cln *Client) Unsubscribe(c *ble.Characteristic, ind bool) error {
 }
 
 // ClearSubscriptions clears all subscriptions to notifications and indications.
-func (cln *Client) ClearSubscriptions() error {
+func (cln *Client) ClearSubscriptions(ctx context.Context) error {
 	for _, s := range cln.conn.subs {
-		if err := cln.Unsubscribe(s.char, false); err != nil {
+		if err := cln.Unsubscribe(ctx, s.char, false); err != nil {
 			return err
 		}
 	}

@@ -34,7 +34,7 @@ func main() {
 	}
 
 	for {
-		fmt.Printf("Client side RSSI: %d\n", client.ReadRSSI())
+		fmt.Printf("Client side RSSI: %d\n", client.ReadRSSI(context.Background()))
 		time.Sleep(time.Second)
 	}
 

@@ -1,6 +1,18 @@
 package ble
 
+import "context"
+
 // A Client is a GATT client.
+//
+// Methods that take a context.Context use it to bound their waits: the
+// request is abandoned and ctx.Err() is returned (unwrapped or wrapped, so
+// errors.Is(err, context.Canceled) / context.DeadlineExceeded hold) when the
+// context is canceled or its deadline passes. Cancellation is best-effort at
+// the transport layer: an in-flight ACL write cannot be interrupted mid-write;
+// on the Linux stack it is independently bounded by hci.ACLWriteTimeout.
+//
+// Teardown paths (CancelConnection) deliberately take no context so that a
+// client can always be torn down, even when no request context is available.
 type Client interface {
 	// Addr returns platform specific unique ID of the remote peripheral, e.g. MAC on Linux, Client UUID on OS X.
 	Addr() Addr
@@ -13,53 +25,53 @@ type Client interface {
 	Profile() *Profile
 
 	// DiscoverProfile discovers the whole hierarchy of a server.
-	DiscoverProfile(force bool) (*Profile, error)
+	DiscoverProfile(ctx context.Context, force bool) (*Profile, error)
 
 	// DiscoverServices finds all the primary services on a server. [Vol 3, Part G, 4.4.1]
 	// If filter is specified, only filtered services are returned.
-	DiscoverServices(filter []UUID) ([]*Service, error)
+	DiscoverServices(ctx context.Context, filter []UUID) ([]*Service, error)
 
 	// DiscoverIncludedServices finds the included services of a service. [Vol 3, Part G, 4.5.1]
 	// If filter is specified, only filtered services are returned.
-	DiscoverIncludedServices(filter []UUID, s *Service) ([]*Service, error)
+	DiscoverIncludedServices(ctx context.Context, filter []UUID, s *Service) ([]*Service, error)
 
 	// DiscoverCharacteristics finds all the characteristics within a service. [Vol 3, Part G, 4.6.1]
 	// If filter is specified, only filtered characteristics are returned.
-	DiscoverCharacteristics(filter []UUID, s *Service) ([]*Characteristic, error)
+	DiscoverCharacteristics(ctx context.Context, filter []UUID, s *Service) ([]*Characteristic, error)
 
 	// DiscoverDescriptors finds all the descriptors within a characteristic. [Vol 3, Part G, 4.7.1]
 	// If filter is specified, only filtered descriptors are returned.
-	DiscoverDescriptors(filter []UUID, c *Characteristic) ([]*Descriptor, error)
+	DiscoverDescriptors(ctx context.Context, filter []UUID, c *Characteristic) ([]*Descriptor, error)
 
 	// ReadCharacteristic reads a characteristic value from a server. [Vol 3, Part G, 4.8.1]
-	ReadCharacteristic(c *Characteristic) ([]byte, error)
+	ReadCharacteristic(ctx context.Context, c *Characteristic) ([]byte, error)
 
 	// ReadLongCharacteristic reads a characteristic value which is longer than the MTU. [Vol 3, Part G, 4.8.3]
-	ReadLongCharacteristic(c *Characteristic) ([]byte, error)
+	ReadLongCharacteristic(ctx context.Context, c *Characteristic) ([]byte, error)
 
 	// WriteCharacteristic writes a characteristic value to a server. [Vol 3, Part G, 4.9.3]
-	WriteCharacteristic(c *Characteristic, value []byte, noRsp bool) error
+	WriteCharacteristic(ctx context.Context, c *Characteristic, value []byte, noRsp bool) error
 
 	// ReadDescriptor reads a characteristic descriptor from a server. [Vol 3, Part G, 4.12.1]
-	ReadDescriptor(d *Descriptor) ([]byte, error)
+	ReadDescriptor(ctx context.Context, d *Descriptor) ([]byte, error)
 
 	// WriteDescriptor writes a characteristic descriptor to a server. [Vol 3, Part G, 4.12.3]
-	WriteDescriptor(d *Descriptor, v []byte) error
+	WriteDescriptor(ctx context.Context, d *Descriptor, v []byte) error
 
 	// ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-	ReadRSSI() int
+	ReadRSSI(ctx context.Context) int
 
 	// ExchangeMTU set the ATT_MTU to the maximum possible value that can be supported by both devices [Vol 3, Part G, 4.3.1]
-	ExchangeMTU(rxMTU int) (txMTU int, err error)
+	ExchangeMTU(ctx context.Context, rxMTU int) (txMTU int, err error)
 
 	// Subscribe subscribes to indication (if ind is set true), or notification of a characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-	Subscribe(c *Characteristic, ind bool, h NotificationHandler) error
+	Subscribe(ctx context.Context, c *Characteristic, ind bool, h NotificationHandler) error
 
 	// Unsubscribe unsubscribes to indication (if ind is set true), or notification of a specified characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-	Unsubscribe(c *Characteristic, ind bool) error
+	Unsubscribe(ctx context.Context, c *Characteristic, ind bool) error
 
 	// ClearSubscriptions clears all subscriptions to notifications and indications.
-	ClearSubscriptions() error
+	ClearSubscriptions(ctx context.Context) error
 
 	// CancelConnection disconnects the connection.
 	CancelConnection() error

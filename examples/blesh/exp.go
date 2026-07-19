@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/go-ble/ble"
 )
 
 func explore(cln ble.Client, p *ble.Profile) error {
+	ctx := context.Background()
 	for _, s := range p.Services {
 		fmt.Printf("    Service: %s %s, Handle (0x%02X)\n", s.UUID, ble.Name(s.UUID), s.Handle)
 
@@ -14,7 +16,7 @@ func explore(cln ble.Client, p *ble.Profile) error {
 			fmt.Printf("      Characteristic: %s %s, Property: 0x%02X (%s), Handle(0x%02X), VHandle(0x%02X)\n",
 				c.UUID, ble.Name(c.UUID), c.Property, propString(c.Property), c.Handle, c.ValueHandle)
 			if (c.Property & ble.CharRead) != 0 {
-				b, err := cln.ReadCharacteristic(c)
+				b, err := cln.ReadCharacteristic(ctx, c)
 				if err != nil {
 					fmt.Printf("Failed to read characteristic: %s\n", err)
 					continue
@@ -24,7 +26,7 @@ func explore(cln ble.Client, p *ble.Profile) error {
 
 			for _, d := range c.Descriptors {
 				fmt.Printf("        Descriptor: %s %s, Handle(0x%02x)\n", d.UUID, ble.Name(d.UUID), d.Handle)
-				b, err := cln.ReadDescriptor(d)
+				b, err := cln.ReadDescriptor(ctx, d)
 				if err != nil {
 					fmt.Printf("Failed to read descriptor: %s\n", err)
 					continue

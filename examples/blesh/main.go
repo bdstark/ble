@@ -290,7 +290,7 @@ func cmdDiscover(c *cli.Context) error {
 	}
 
 	fmt.Printf("Discovering profile...\n")
-	p, err := curr.client.DiscoverProfile(true)
+	p, err := curr.client.DiscoverProfile(context.Background(), true)
 	if err != nil {
 		return errors.Wrap(err, "can't discover profile")
 	}
@@ -324,7 +324,7 @@ func cmdRead(c *cli.Context) error {
 		return err
 	}
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
-		b, err := curr.client.ReadCharacteristic(u.(*ble.Characteristic))
+		b, err := curr.client.ReadCharacteristic(context.Background(), u.(*ble.Characteristic))
 		if err != nil {
 			return errors.Wrap(err, "can't read characteristic")
 		}
@@ -332,7 +332,7 @@ func cmdRead(c *cli.Context) error {
 		return nil
 	}
 	if u := curr.profile.Find(ble.NewDescriptor(curr.uuid)); u != nil {
-		b, err := curr.client.ReadDescriptor(u.(*ble.Descriptor))
+		b, err := curr.client.ReadDescriptor(context.Background(), u.(*ble.Descriptor))
 		if err != nil {
 			return errors.Wrap(err, "can't read descriptor")
 		}
@@ -353,11 +353,11 @@ func cmdWrite(c *cli.Context) error {
 		return err
 	}
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
-		err := curr.client.WriteCharacteristic(u.(*ble.Characteristic), []byte("hello"), true)
+		err := curr.client.WriteCharacteristic(context.Background(), u.(*ble.Characteristic), []byte("hello"), true)
 		return errors.Wrap(err, "can't write characteristic")
 	}
 	if u := curr.profile.Find(ble.NewDescriptor(curr.uuid)); u != nil {
-		err := curr.client.WriteDescriptor(u.(*ble.Descriptor), []byte("fixme"))
+		err := curr.client.WriteDescriptor(context.Background(), u.(*ble.Descriptor), []byte("fixme"))
 		return errors.Wrap(err, "can't write descriptor")
 	}
 	return errNoUUID
@@ -376,7 +376,7 @@ func cmdSub(c *cli.Context) error {
 	// NotificationHandler
 	h := func(req []byte) { fmt.Printf("notified: %x | %q\n", req, req) }
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
-		err := curr.client.Subscribe(u.(*ble.Characteristic), c.Bool("ind"), h)
+		err := curr.client.Subscribe(context.Background(), u.(*ble.Characteristic), c.Bool("ind"), h)
 		return errors.Wrap(err, "can't subscribe to characteristic")
 	}
 	return errNoUUID
@@ -390,7 +390,7 @@ func cmdUnsub(c *cli.Context) error {
 		return err
 	}
 	if u := curr.profile.Find(ble.NewCharacteristic(curr.uuid)); u != nil {
-		err := curr.client.Unsubscribe(u.(*ble.Characteristic), c.Bool("ind"))
+		err := curr.client.Unsubscribe(context.Background(), u.(*ble.Characteristic), c.Bool("ind"))
 		return errors.Wrap(err, "can't unsubscribe to characteristic")
 	}
 	return errNoUUID

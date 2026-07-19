@@ -1,6 +1,7 @@
 package gatt
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -59,21 +60,21 @@ func (p *Client) Profile() *ble.Profile {
 }
 
 // DiscoverProfile discovers the whole hierarchy of a server.
-func (p *Client) DiscoverProfile(force bool) (*ble.Profile, error) {
+func (p *Client) DiscoverProfile(ctx context.Context, force bool) (*ble.Profile, error) {
 	if p.profile != nil && !force {
 		return p.profile, nil
 	}
-	ss, err := p.DiscoverServices(nil)
+	ss, err := p.DiscoverServices(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("can't discover services: %s", err)
 	}
 	for _, s := range ss {
-		cs, err := p.DiscoverCharacteristics(nil, s)
+		cs, err := p.DiscoverCharacteristics(ctx, nil, s)
 		if err != nil {
 			return nil, fmt.Errorf("can't discover characteristics: %s", err)
 		}
 		for _, c := range cs {
-			_, err := p.DiscoverDescriptors(nil, c)
+			_, err := p.DiscoverDescriptors(ctx, nil, c)
 			if err != nil {
 				return nil, fmt.Errorf("can't discover descriptors: %s", err)
 			}
@@ -85,7 +86,7 @@ func (p *Client) DiscoverProfile(force bool) (*ble.Profile, error) {
 
 // DiscoverServices finds all the primary services on a server. [Vol 3, Part G, 4.4.1]
 // If filter is specified, only filtered services are returned.
-func (p *Client) DiscoverServices(filter []ble.UUID) ([]*ble.Service, error) {
+func (p *Client) DiscoverServices(ctx context.Context, filter []ble.UUID) ([]*ble.Service, error) {
 	p.Lock()
 	defer p.Unlock()
 	if p.profile == nil {
@@ -93,7 +94,7 @@ func (p *Client) DiscoverServices(filter []ble.UUID) ([]*ble.Service, error) {
 	}
 	start := uint16(0x0001)
 	for {
-		length, b, err := p.ac.ReadByGroupType(start, 0xFFFF, ble.PrimaryServiceUUID)
+		length, b, err := p.ac.ReadByGroupType(ctx, start, 0xFFFF, ble.PrimaryServiceUUID)
 		if err == ble.ErrAttrNotFound {
 			return p.profile.Services, nil
 		}
@@ -123,7 +124,7 @@ func (p *Client) DiscoverServices(filter []ble.UUID) ([]*ble.Service, error) {
 
 // DiscoverIncludedServices finds the included services of a service. [Vol 3, Part G, 4.5.1]
 // If filter is specified, only filtered services are returned.
-func (p *Client) DiscoverIncludedServices(ss []ble.UUID, s *ble.Service) ([]*ble.Service, error) {
+func (p *Client) DiscoverIncludedServices(ctx context.Context, ss []ble.UUID, s *ble.Service) ([]*ble.Service, error) {
 	p.Lock()
 	defer p.Unlock()
 	return nil, nil
@@ -131,13 +132,13 @@ func (p *Client) DiscoverIncludedServices(ss []ble.UUID, s *ble.Service) ([]*ble
 
 // DiscoverCharacteristics finds all the characteristics within a service. [Vol 3, Part G, 4.6.1]
 // If filter is specified, only filtered characteristics are returned.
-func (p *Client) DiscoverCharacteristics(filter []ble.UUID, s *ble.Service) ([]*ble.Characteristic, error) {
+func (p *Client) DiscoverCharacteristics(ctx context.Context, filter []ble.UUID, s *ble.Service) ([]*ble.Characteristic, error) {
 	p.Lock()
 	defer p.Unlock()
 	start := s.Handle
 	var lastChar *ble.Characteristic
 	for start <= s.EndHandle {
-		length, b, err := p.ac.ReadByType(start, s.EndHandle, ble.CharacteristicUUID)
+		length, b, err := p.ac.ReadByType(ctx, start, s.EndHandle, ble.CharacteristicUUID)
 		if err == ble.ErrAttrNotFound {
 			break
 		} else if err != nil {
@@ -171,12 +172,12 @@ func (p *Client) DiscoverCharacteristics(filter []ble.UUID, s *ble.Service) ([]*
 
 // DiscoverDescriptors finds all the descriptors within a characteristic. [Vol 3, Part G, 4.7.1]
 // If filter is specified, only filtered descriptors are returned.
-func (p *Client) DiscoverDescriptors(filter []ble.UUID, c *ble.Characteristic) ([]*ble.Descriptor, error) {
+func (p *Client) DiscoverDescriptors(ctx context.Context, filter []ble.UUID, c *ble.Characteristic) ([]*ble.Descriptor, error) {
 	p.Lock()
 	defer p.Unlock()
 	start := c.ValueHandle + 1
 	for start <= c.EndHandle {
-		fmt, b, err := p.ac.FindInformation(start, c.EndHandle)
+		fmt, b, err := p.ac.FindInformation(ctx, start, c.EndHandle)
 		if err == ble.ErrAttrNotFound {
 			break
 		} else if err != nil {
@@ -204,10 +205,10 @@ func (p *Client) DiscoverDescriptors(filter []ble.UUID, c *ble.Characteristic) (
 }
 
 // ReadCharacteristic reads a characteristic value from a server. [Vol 3, Part G, 4.8.1]
-func (p *Client) ReadCharacteristic(c *ble.Characteristic) ([]byte, error) {
+func (p *Client) ReadCharacteristic(ctx context.Context, c *ble.Characteristic) ([]byte, error) {
 	p.Lock()
 	defer p.Unlock()
-	val, err := p.ac.Read(c.ValueHandle)
+	val, err := p.ac.Read(ctx, c.ValueHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -217,21 +218,21 @@ func (p *Client) ReadCharacteristic(c *ble.Characteristic) ([]byte, error) {
 }
 
 // ReadLongCharacteristic reads a characteristic value which is longer than the MTU. [Vol 3, Part G, 4.8.3]
-func (p *Client) ReadLongCharacteristic(c *ble.Characteristic) ([]byte, error) {
+func (p *Client) ReadLongCharacteristic(ctx context.Context, c *ble.Characteristic) ([]byte, error) {
 	p.Lock()
 	defer p.Unlock()
 
 	// The maximum length of an attribute value shall be 512 octects [Vol 3, 3.2.9]
 	buffer := make([]byte, 0, 512)
 
-	read, err := p.ac.Read(c.ValueHandle)
+	read, err := p.ac.Read(ctx, c.ValueHandle)
 	if err != nil {
 		return nil, err
 	}
 	buffer = append(buffer, read...)
 
 	for len(read) >= p.conn.TxMTU()-1 {
-		if read, err = p.ac.ReadBlob(c.ValueHandle, uint16(len(buffer))); err != nil {
+		if read, err = p.ac.ReadBlob(ctx, c.ValueHandle, uint16(len(buffer))); err != nil {
 			return nil, err
 		}
 		buffer = append(buffer, read...)
@@ -242,20 +243,20 @@ func (p *Client) ReadLongCharacteristic(c *ble.Characteristic) ([]byte, error) {
 }
 
 // WriteCharacteristic writes a characteristic value to a server. [Vol 3, Part G, 4.9.3]
-func (p *Client) WriteCharacteristic(c *ble.Characteristic, v []byte, noRsp bool) error {
+func (p *Client) WriteCharacteristic(ctx context.Context, c *ble.Characteristic, v []byte, noRsp bool) error {
 	p.Lock()
 	defer p.Unlock()
 	if noRsp {
-		return p.ac.WriteCommand(c.ValueHandle, v)
+		return p.ac.WriteCommand(ctx, c.ValueHandle, v)
 	}
-	return p.ac.Write(c.ValueHandle, v)
+	return p.ac.Write(ctx, c.ValueHandle, v)
 }
 
 // ReadDescriptor reads a characteristic descriptor from a server. [Vol 3, Part G, 4.12.1]
-func (p *Client) ReadDescriptor(d *ble.Descriptor) ([]byte, error) {
+func (p *Client) ReadDescriptor(ctx context.Context, d *ble.Descriptor) ([]byte, error) {
 	p.Lock()
 	defer p.Unlock()
-	val, err := p.ac.Read(d.Handle)
+	val, err := p.ac.Read(ctx, d.Handle)
 	if err != nil {
 		return nil, err
 	}
@@ -265,14 +266,15 @@ func (p *Client) ReadDescriptor(d *ble.Descriptor) ([]byte, error) {
 }
 
 // WriteDescriptor writes a characteristic descriptor to a server. [Vol 3, Part G, 4.12.3]
-func (p *Client) WriteDescriptor(d *ble.Descriptor, v []byte) error {
+func (p *Client) WriteDescriptor(ctx context.Context, d *ble.Descriptor, v []byte) error {
 	p.Lock()
 	defer p.Unlock()
-	return p.ac.Write(d.Handle, v)
+	return p.ac.Write(ctx, d.Handle, v)
 }
 
 // ReadRSSI retrieves the current RSSI value of remote peripheral. [Vol 2, Part E, 7.5.4]
-func (p *Client) ReadRSSI() int {
+// The underlying HCI command exchange is bounded internally, not by ctx.
+func (p *Client) ReadRSSI(ctx context.Context) int {
 	p.Lock()
 	defer p.Unlock()
 	return p.conn.ReadRSSI()
@@ -280,41 +282,41 @@ func (p *Client) ReadRSSI() int {
 
 // ExchangeMTU informs the server of the client’s maximum receive MTU size and
 // request the server to respond with its maximum receive MTU size. [Vol 3, Part F, 3.4.2.1]
-func (p *Client) ExchangeMTU(mtu int) (int, error) {
+func (p *Client) ExchangeMTU(ctx context.Context, mtu int) (int, error) {
 	p.Lock()
 	defer p.Unlock()
-	return p.ac.ExchangeMTU(mtu)
+	return p.ac.ExchangeMTU(ctx, mtu)
 }
 
 // Subscribe subscribes to indication (if ind is set true), or notification of a
 // characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-func (p *Client) Subscribe(c *ble.Characteristic, ind bool, h ble.NotificationHandler) error {
+func (p *Client) Subscribe(ctx context.Context, c *ble.Characteristic, ind bool, h ble.NotificationHandler) error {
 	p.Lock()
 	defer p.Unlock()
 	if c.CCCD == nil {
 		return fmt.Errorf("CCCD not found")
 	}
 	if ind {
-		return p.setHandlers(c.CCCD.Handle, c.ValueHandle, cccIndicate, h)
+		return p.setHandlers(ctx, c.CCCD.Handle, c.ValueHandle, cccIndicate, h)
 	}
-	return p.setHandlers(c.CCCD.Handle, c.ValueHandle, cccNotify, h)
+	return p.setHandlers(ctx, c.CCCD.Handle, c.ValueHandle, cccNotify, h)
 }
 
 // Unsubscribe unsubscribes to indication (if ind is set true), or notification
 // of a specified characteristic value. [Vol 3, Part G, 4.10 & 4.11]
-func (p *Client) Unsubscribe(c *ble.Characteristic, ind bool) error {
+func (p *Client) Unsubscribe(ctx context.Context, c *ble.Characteristic, ind bool) error {
 	p.Lock()
 	defer p.Unlock()
 	if c.CCCD == nil {
 		return fmt.Errorf("CCCD not found")
 	}
 	if ind {
-		return p.setHandlers(c.CCCD.Handle, c.ValueHandle, cccIndicate, nil)
+		return p.setHandlers(ctx, c.CCCD.Handle, c.ValueHandle, cccIndicate, nil)
 	}
-	return p.setHandlers(c.CCCD.Handle, c.ValueHandle, cccNotify, nil)
+	return p.setHandlers(ctx, c.CCCD.Handle, c.ValueHandle, cccNotify, nil)
 }
 
-func (p *Client) setHandlers(cccdh, vh, flag uint16, h ble.NotificationHandler) error {
+func (p *Client) setHandlers(ctx context.Context, cccdh, vh, flag uint16, h ble.NotificationHandler) error {
 	s, ok := p.subs[vh]
 	if !ok {
 		s = &sub{cccdh, 0x0000, nil, nil}
@@ -338,16 +340,16 @@ func (p *Client) setHandlers(cccdh, vh, flag uint16, h ble.NotificationHandler) 
 	} else {
 		s.iHandler = h
 	}
-	return p.ac.Write(s.cccdh, v)
+	return p.ac.Write(ctx, s.cccdh, v)
 }
 
 // ClearSubscriptions clears all subscriptions to notifications and indications.
-func (p *Client) ClearSubscriptions() error {
+func (p *Client) ClearSubscriptions(ctx context.Context) error {
 	p.Lock()
 	defer p.Unlock()
 	zero := make([]byte, 2)
 	for vh, s := range p.subs {
-		if err := p.ac.Write(s.cccdh, zero); err != nil {
+		if err := p.ac.Write(ctx, s.cccdh, zero); err != nil {
 			return err
 		}
 		delete(p.subs, vh)

@@ -1,6 +1,7 @@
 package att
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -47,7 +48,7 @@ func NewClient(l2c ble.Conn, h NotificationHandler) *Client {
 
 // ExchangeMTU informs the server of the client’s maximum receive MTU size and
 // request the server to respond with its maximum receive MTU size. [Vol 3, Part F, 3.4.2.1]
-func (c *Client) ExchangeMTU(clientRxMTU int) (serverRxMTU int, err error) {
+func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU int, err error) {
 	if clientRxMTU < ble.DefaultMTU || clientRxMTU > ble.MaxMTU {
 		return 0, ErrInvalidArgument
 	}
@@ -55,7 +56,10 @@ func (c *Client) ExchangeMTU(clientRxMTU int) (serverRxMTU int, err error) {
 	// Acquire and reuse the txBuf, and release it after usage.
 	// The same txBuf, or a newly allocate one, if the txMTU is changed,
 	// will be released back to the channel.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return 0, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	// Let L2CAP know the MTU we can handle.
@@ -65,7 +69,7 @@ func (c *Client) ExchangeMTU(clientRxMTU int) (serverRxMTU int, err error) {
 	req.SetAttributeOpcode()
 	req.SetClientRxMTU(uint16(clientRxMTU))
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return 0, err
 	}
@@ -98,13 +102,16 @@ func (c *Client) ExchangeMTU(clientRxMTU int) (serverRxMTU int, err error) {
 // FindInformation obtains the mapping of attribute handles with their associated types.
 // This allows a Client to discover the list of attributes and their types on a server.
 // [Vol 3, Part F, 3.4.3.1 & 3.4.3.2]
-func (c *Client) FindInformation(starth, endh uint16) (fmt int, data []byte, err error) {
+func (c *Client) FindInformation(ctx context.Context, starth, endh uint16) (fmt int, data []byte, err error) {
 	if starth == 0 || starth > endh {
 		return 0x00, nil, ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return 0x00, nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := FindInformationRequest(txBuf[:5])
@@ -112,7 +119,7 @@ func (c *Client) FindInformation(starth, endh uint16) (fmt int, data []byte, err
 	req.SetStartingHandle(starth)
 	req.SetEndingHandle(endh)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return 0x00, nil, err
 	}
@@ -152,13 +159,16 @@ func (c *Client) FindInformation(starth, endh uint16) (fmt int, data []byte, err
 
 // ReadByType obtains the values of attributes where the attribute type is known
 // but the handle is not known. [Vol 3, Part F, 3.4.4.1 & 3.4.4.2]
-func (c *Client) ReadByType(starth, endh uint16, uuid ble.UUID) (int, []byte, error) {
+func (c *Client) ReadByType(ctx context.Context, starth, endh uint16, uuid ble.UUID) (int, []byte, error) {
 	if starth > endh || (len(uuid) != 2 && len(uuid) != 16) {
 		return 0, nil, ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ReadByTypeRequest(txBuf[:5+len(uuid)])
@@ -167,7 +177,7 @@ func (c *Client) ReadByType(starth, endh uint16, uuid ble.UUID) (int, []byte, er
 	req.SetEndingHandle(endh)
 	req.SetAttributeType(uuid)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -189,17 +199,20 @@ func (c *Client) ReadByType(starth, endh uint16, uuid ble.UUID) (int, []byte, er
 
 // Read requests the server to read the value of an attribute and return its
 // value in a Read Response. [Vol 3, Part F, 3.4.4.3 & 3.4.4.4]
-func (c *Client) Read(handle uint16) ([]byte, error) {
+func (c *Client) Read(ctx context.Context, handle uint16) ([]byte, error) {
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ReadRequest(txBuf[:3])
 	req.SetAttributeOpcode()
 	req.SetAttributeHandle(handle)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -222,10 +235,13 @@ func (c *Client) Read(handle uint16) ([]byte, error) {
 // ReadBlob requests the server to read part of the value of an attribute at a
 // given offset and return a specific part of the value in a Read Blob Response.
 // [Vol 3, Part F, 3.4.4.5 & 3.4.4.6]
-func (c *Client) ReadBlob(handle, offset uint16) ([]byte, error) {
+func (c *Client) ReadBlob(ctx context.Context, handle, offset uint16) ([]byte, error) {
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ReadBlobRequest(txBuf[:5])
@@ -233,7 +249,7 @@ func (c *Client) ReadBlob(handle, offset uint16) ([]byte, error) {
 	req.SetAttributeHandle(handle)
 	req.SetValueOffset(offset)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -259,14 +275,17 @@ func (c *Client) ReadBlob(handle, offset uint16) ([]byte, error) {
 // the last value that can have a variable length. The knowledge of whether
 // attributes have a known fixed size is defined in a higher layer specification.
 // [Vol 3, Part F, 3.4.4.7 & 3.4.4.8]
-func (c *Client) ReadMultiple(handles []uint16) ([]byte, error) {
+func (c *Client) ReadMultiple(ctx context.Context, handles []uint16) ([]byte, error) {
 	// Should request to read two or more values.
 	if len(handles) < 2 || len(handles)*2 > c.l2c.TxMTU()-1 {
 		return nil, ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ReadMultipleRequest(txBuf[:1+len(handles)*2])
@@ -277,7 +296,7 @@ func (c *Client) ReadMultiple(handles []uint16) ([]byte, error) {
 		p = p[2:]
 	}
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -300,13 +319,16 @@ func (c *Client) ReadMultiple(handles []uint16) ([]byte, error) {
 // ReadByGroupType obtains the values of attributes where the attribute type is known,
 // the type of a grouping attribute as defined by a higher layer specification, but
 // the handle is not known. [Vol 3, Part F, 3.4.4.9 & 3.4.4.10]
-func (c *Client) ReadByGroupType(starth, endh uint16, uuid ble.UUID) (int, []byte, error) {
+func (c *Client) ReadByGroupType(ctx context.Context, starth, endh uint16, uuid ble.UUID) (int, []byte, error) {
 	if starth > endh || (len(uuid) != 2 && len(uuid) != 16) {
 		return 0, nil, ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ReadByGroupTypeRequest(txBuf[:5+len(uuid)])
@@ -315,7 +337,7 @@ func (c *Client) ReadByGroupType(starth, endh uint16, uuid ble.UUID) (int, []byt
 	req.SetEndingHandle(endh)
 	req.SetAttributeGroupType(uuid)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -340,13 +362,16 @@ func (c *Client) ReadByGroupType(starth, endh uint16, uuid ble.UUID) (int, []byt
 
 // Write requests the server to write the value of an attribute and acknowledge that
 // this has been achieved in a Write Response. [Vol 3, Part F, 3.4.5.1 & 3.4.5.2]
-func (c *Client) Write(handle uint16, value []byte) error {
+func (c *Client) Write(ctx context.Context, handle uint16, value []byte) error {
 	if len(value) > c.l2c.TxMTU()-3 {
 		return ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := WriteRequest(txBuf[:3+len(value)])
@@ -354,7 +379,7 @@ func (c *Client) Write(handle uint16, value []byte) error {
 	req.SetAttributeHandle(handle)
 	req.SetAttributeValue(value)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -374,13 +399,16 @@ func (c *Client) Write(handle uint16, value []byte) error {
 
 // WriteCommand requests the server to write the value of an attribute, typically
 // into a control-point attribute. [Vol 3, Part F, 3.4.5.3]
-func (c *Client) WriteCommand(handle uint16, value []byte) error {
+func (c *Client) WriteCommand(ctx context.Context, handle uint16, value []byte) error {
 	if len(value) > c.l2c.TxMTU()-3 {
 		return ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := WriteCommand(txBuf[:3+len(value)])
@@ -393,13 +421,16 @@ func (c *Client) WriteCommand(handle uint16, value []byte) error {
 
 // SignedWrite requests the server to write the value of an attribute with an authentication
 // signature, typically into a control-point attribute. [Vol 3, Part F, 3.4.5.4]
-func (c *Client) SignedWrite(handle uint16, value []byte, signature [12]byte) error {
+func (c *Client) SignedWrite(ctx context.Context, handle uint16, value []byte, signature [12]byte) error {
 	if len(value) > c.l2c.TxMTU()-15 {
 		return ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := SignedWriteCommand(txBuf[:15+len(value)])
@@ -415,13 +446,16 @@ func (c *Client) SignedWrite(handle uint16, value []byte, signature [12]byte) er
 // The server will respond to this request with a Prepare Write Response, so that
 // the Client can verify that the value was received correctly.
 // [Vol 3, Part F, 3.4.6.1 & 3.4.6.2]
-func (c *Client) PrepareWrite(handle uint16, offset uint16, value []byte) (uint16, uint16, []byte, error) {
+func (c *Client) PrepareWrite(ctx context.Context, handle uint16, offset uint16, value []byte) (uint16, uint16, []byte, error) {
 	if len(value) > c.l2c.TxMTU()-5 {
 		return 0, 0, nil, ErrInvalidArgument
 	}
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return 0, 0, nil, err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := PrepareWriteRequest(txBuf[:5+len(value)])
@@ -429,7 +463,7 @@ func (c *Client) PrepareWrite(handle uint16, offset uint16, value []byte) (uint1
 	req.SetAttributeHandle(handle)
 	req.SetValueOffset(offset)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -452,17 +486,20 @@ func (c *Client) PrepareWrite(handle uint16, offset uint16, value []byte) (uint1
 // ExecuteWrite requests the server to write or cancel the write of all the prepared
 // values currently held in the prepare queue from this Client. This request shall be
 // handled by the server as an atomic operation. [Vol 3, Part F, 3.4.6.3 & 3.4.6.4]
-func (c *Client) ExecuteWrite(flags uint8) error {
+func (c *Client) ExecuteWrite(ctx context.Context, flags uint8) error {
 
 	// Acquire and reuse the txBuf, and release it after usage.
-	txBuf := <-c.chTxBuf
+	txBuf, err := c.acquireTxBuf(ctx)
+	if err != nil {
+		return err
+	}
 	defer func() { c.chTxBuf <- txBuf }()
 
 	req := ExecuteWriteRequest(txBuf[:1])
 	req.SetAttributeOpcode()
 	req.SetFlags(flags)
 
-	b, err := c.sendReq(req)
+	b, err := c.sendReq(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -480,14 +517,42 @@ func (c *Client) ExecuteWrite(flags uint8) error {
 	return nil
 }
 
+// acquireTxBuf obtains the shared transmit buffer, giving up when ctx is
+// done. The buffer is returned only by the previous request method's
+// deferred release; if that request is wedged (e.g. an in-flight ACL write
+// on a dead link), an unbounded receive would park this caller too.
+func (c *Client) acquireTxBuf(ctx context.Context) ([]byte, error) {
+	select {
+	case b := <-c.chTxBuf:
+		return b, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (c *Client) sendCmd(b []byte) error {
 	_, err := c.l2c.Write(b)
 	return err
 }
 
-func (c *Client) sendReq(b []byte) (rsp []byte, err error) {
+// sendReq writes the request PDU and waits for its response. The wait is
+// bounded by ctx and by the 30s ATT sequential-protocol timeout. The l2c
+// write itself cannot be interrupted mid-write; on the linux stack it is
+// independently bounded by hci.ACLWriteTimeout.
+func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) {
 	if logDebugEnabled() {
 		ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
+	}
+	// Drain the response of an earlier abandoned request (ctx cancellation
+	// or ATT timeout), if one straggled in since: it would otherwise be
+	// mistaken for the response to this request, or park the read loop on
+	// the unbuffered rspc send.
+	select {
+	case stale := <-c.rspc:
+		if logDebugEnabled() {
+			ble.Logger.Debug("client: dropping stale rsp of an abandoned request", "pdu", fmt.Sprintf("% X", stale))
+		}
+	default:
 	}
 	if _, err := c.l2c.Write(b); err != nil {
 		return nil, errors.Wrap(err, "send ATT request failed")
@@ -512,6 +577,8 @@ func (c *Client) sendReq(b []byte) (rsp []byte, err error) {
 			}
 		case err := <-c.chErr:
 			return nil, errors.Wrap(err, "ATT request failed")
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case <-time.After(30 * time.Second):
 			return nil, errors.Wrap(ErrSeqProtoTimeout, "ATT request timeout")
 		}
