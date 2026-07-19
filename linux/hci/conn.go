@@ -227,24 +227,10 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 			flen = pkt.Cap() - 1 - 4
 		}
 
-		// Prepare the Headers
-
-		// HCI Header: pkt Type
-		if err := binary.Write(pkt, binary.LittleEndian, pktTypeACLData); err != nil {
-			return 0, err
-		}
-		// ACL Header: handle and flags
-		if err := binary.Write(pkt, binary.LittleEndian, c.param.ConnectionHandle()|(flags<<8)); err != nil {
-			return 0, err
-		}
-		// ACL Header: data len
-		if err := binary.Write(pkt, binary.LittleEndian, uint16(flen)); err != nil {
-			return 0, err
-		}
-		// Append payload
-		if err := binary.Write(pkt, binary.LittleEndian, pdu[:flen]); err != nil {
-			return 0, err
-		}
+		// HCI ACL Data header + fragment payload. Assembled with direct byte
+		// writes: binary.Write pays a reflection pass per call, four times
+		// per fragment on this path.
+		writeACLData(pkt, c.param.ConnectionHandle()|(flags<<8), pdu[:flen])
 
 		// Flush the pkt to HCI
 		select {
@@ -262,6 +248,18 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 		pdu = pdu[flen:]             // Advence the point
 	}
 	return sent, nil
+}
+
+// writeACLData appends one HCI ACL Data packet to pkt [Vol 2, Part E, 5.4.2]:
+// packet type (1 byte), handle|flags (2 bytes LE), data length (2 bytes LE),
+// then the payload. bytes.Buffer writes never fail, so no error is returned.
+func writeACLData(pkt *bytes.Buffer, handleFlags uint16, payload []byte) {
+	var hdr [5]byte
+	hdr[0] = pktTypeACLData
+	binary.LittleEndian.PutUint16(hdr[1:3], handleFlags)
+	binary.LittleEndian.PutUint16(hdr[3:5], uint16(len(payload)))
+	pkt.Write(hdr[:])
+	pkt.Write(payload)
 }
 
 // Recombines fragments into a L2CAP PDU. [Vol 3, Part A, 7.2.2]
