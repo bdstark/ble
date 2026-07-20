@@ -22,7 +22,12 @@ func (h *HCI) SetAdvHandler(ah ble.AdvHandler) error {
 	return nil
 }
 
-// Scan starts scanning.
+// Scan starts scanning. A Command Disallowed rejection means the controller
+// is already scanning while the host believes it is not — the enable that
+// started it was abandoned by a send() completion timeout and its straggling
+// completion was dropped (observed in production 2026-07-19: every scan
+// failed with Disallowed for 20 hours). Reconcile by stopping the unknown
+// scan and enabling once more.
 func (h *HCI) Scan(allowDup bool) error {
 	h.params.scanEnable.FilterDuplicates = 1
 	if allowDup {
@@ -31,13 +36,26 @@ func (h *HCI) Scan(allowDup bool) error {
 	h.params.scanEnable.LEScanEnable = 1
 	h.adHist = make([]*Advertisement, 128)
 	h.adLast = 0
-	return h.Send(&h.params.scanEnable, nil)
+	err := h.Send(&h.params.scanEnable, nil)
+	if err == ErrDisallowed {
+		if serr := h.StopScanning(); serr != nil {
+			return fmt.Errorf("hci: scan disallowed and reconciling stop failed: %w", serr)
+		}
+		h.params.scanEnable.LEScanEnable = 1
+		err = h.Send(&h.params.scanEnable, nil)
+	}
+	return err
 }
 
-// StopScanning stops scanning.
+// StopScanning stops scanning. Command Disallowed means the controller is
+// not scanning — already the desired state, so it is reported as success.
 func (h *HCI) StopScanning() error {
 	h.params.scanEnable.LEScanEnable = 0
-	return h.Send(&h.params.scanEnable, nil)
+	err := h.Send(&h.params.scanEnable, nil)
+	if err == ErrDisallowed {
+		return nil
+	}
+	return err
 }
 
 // AdvertiseAdv advertises a given Advertisement
@@ -208,7 +226,17 @@ func (h *HCI) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	if _, ok := a.(RandomAddress); ok {
 		h.params.connParams.PeerAddressType = 1
 	}
-	if err = h.Send(&h.params.connParams, nil); err != nil {
+	err = h.Send(&h.params.connParams, nil)
+	if err == ErrDisallowed {
+		// The controller is already initiating a connection the host has
+		// forgotten (a create abandoned by a send() completion timeout whose
+		// completion straggled in late). Cancel it and retry once; the
+		// cancel's LE Connection Complete (status: unknown connection id) is
+		// absorbed by handleLEConnectionComplete.
+		_ = h.Send(&h.params.connCancel, nil)
+		err = h.Send(&h.params.connParams, nil)
+	}
+	if err != nil {
 		return nil, err
 	}
 	var tmo <-chan time.Time

@@ -295,8 +295,16 @@ func (h *HCI) Send(c Command, r CommandRP) error {
 
 // cmdTimeout bounds both waits in the command path: acquiring a command
 // buffer and waiting for the controller's completion event. Commands
-// normally complete in milliseconds; hitting this means the controller
-// has stopped responding and the HCI instance is closed.
+// normally complete in milliseconds. The two timeouts differ in severity:
+// running out of command buffers means the controller stopped returning
+// credits entirely, so send closes the HCI; a missed completion is
+// survivable (under multi-link RF load a stall past cmdTimeout with the
+// completion straggling in late is a few-times-a-day event) and send just
+// returns ErrCommandTimeout for the caller to retry. The abandoned command
+// may still have executed, leaving controller state the host never
+// recorded; the state-bearing commands reconcile that divergence when the
+// controller answers a retry with Command Disallowed — see Scan,
+// StopScanning, and Dial in gap.go.
 var cmdTimeout = 10 * time.Second
 
 func (h *HCI) send(c Command) ([]byte, error) {
