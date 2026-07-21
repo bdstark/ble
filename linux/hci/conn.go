@@ -697,19 +697,61 @@ func (c *Conn) kill() bool {
 	return initiated
 }
 
-// Close disconnects the connection by sending hci disconnect command to the device.
+// disconnectTimeout bounds Close's wait for the DisconnectionComplete event
+// after the Disconnect command itself failed. When the command was answered
+// the event follows within the link's supervision timeout; this wait only
+// covers the failed-command case, where the most likely outcomes are a
+// straggling event (arrives quickly once the abandoned command executes
+// late) or no event at all.
+var disconnectTimeout = 5 * time.Second
+
+// Close disconnects the connection by sending the HCI Disconnect command.
+// Teardown is event-driven: the DisconnectionComplete event deregisters the
+// conn, closes its channels, and reclaims its TX credits. If the command
+// fails — the abandoned-command family: a completion timeout means it may
+// execute late or never — that event cannot be relied on, so Close retries
+// the command once and then, if the event still hasn't arrived within
+// disconnectTimeout, force-deregisters the conn exactly as the event
+// handler would have. Without this, a lost Disconnect left a permanent
+// zombie: the conn stayed in h.conns with its recombine goroutine parked,
+// and kill's killOnce had already spent the only teardown attempt.
 func (c *Conn) Close() error {
 	select {
 	case <-c.chDone:
 		// Return if it's already closed.
 		return nil
 	default:
-		c.hci.Send(&cmd.Disconnect{
-			ConnectionHandle: c.param.ConnectionHandle(),
-			Reason:           0x13,
-		}, nil)
+	}
+	d := &cmd.Disconnect{
+		ConnectionHandle: c.param.ConnectionHandle(),
+		Reason:           0x13,
+	}
+	err := c.hci.Send(d, nil)
+	if err == nil {
 		return nil
 	}
+	// Retry once: after a completion timeout a functional controller
+	// answers the retry immediately (typically with Unknown Connection
+	// Identifier if the abandoned command executed late — the event is
+	// then already on its way); a deterministic refusal repeats cheaply.
+	// If instead the controller has stopped returning command credits,
+	// this send escalates to send's credit-starvation close of the whole
+	// HCI, whose cleanupConns tears this conn down too — the chDone arm
+	// below returns promptly in that case.
+	if err2 := c.hci.Send(d, nil); err2 == nil {
+		return nil
+	}
+	t := time.NewTimer(disconnectTimeout)
+	defer t.Stop()
+	select {
+	case <-c.chDone:
+		// The event (or a whole-adapter teardown) got here after all.
+	case <-t.C:
+		ble.Logger.Warn("hci: no disconnection event after a failed Disconnect command; force-closing conn",
+			"handle", c.param.ConnectionHandle(), "err", err)
+		c.hci.cleanupConn(c)
+	}
+	return nil
 }
 
 // LocalAddr returns local device's MAC address.

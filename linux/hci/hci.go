@@ -516,6 +516,32 @@ func (h *HCI) cleanupConns() {
 	}
 }
 
+// cleanupConn force-removes c as though its DisconnectionComplete had been
+// processed: deregister, close channels, reclaim TX credits. Used by
+// Conn.Close when the Disconnect command failed and the event never arrived
+// — the one abandoned-command aftermath with no completion to reconcile on.
+// Safe against a racing event or cleanupConns: whoever removes c from
+// h.conns performs the teardown, and closeChans/ReclaimAll tolerate
+// repeats. Should the abandoned Disconnect still execute later, its event
+// finds no conn and handleDisconnectionComplete reports the stray handle —
+// log noise, not state divergence.
+func (h *HCI) cleanupConn(c *Conn) {
+	handle := c.param.ConnectionHandle()
+	h.muConns.Lock()
+	cc, found := h.conns[handle]
+	if found && cc == c {
+		delete(h.conns, handle)
+	}
+	h.muConns.Unlock()
+	if !found || cc != c {
+		// Already torn down — or the handle was reused by a newer conn,
+		// which must be left alone.
+		return
+	}
+	c.closeChans()
+	c.txBuffer.ReclaimAll()
+}
+
 func (h *HCI) handlePkt(b []byte) error {
 	// Strip the 1-byte HCI header and pass down the rest of the packet.
 	t, b := b[0], b[1:]

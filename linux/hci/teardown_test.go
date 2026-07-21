@@ -2,6 +2,7 @@ package hci
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"sync"
@@ -46,9 +47,14 @@ func newTeardownHCI(t *testing.T, skt *fakeSkt) *HCI {
 }
 
 // addConn registers a fresh master connection (with its recombine goroutine)
-// under the given handle.
+// under the given handle. The handle is also stamped into the conn's param
+// (offset per evt.LEConnectionComplete; Role stays 0 == roleMaster) so paths
+// that key on c.param.ConnectionHandle() — Close's force cleanup — find the
+// registration.
 func addConn(h *HCI, handle uint16) *Conn {
-	c := newConn(h, make(evt.LEConnectionComplete, 19)) // zero Role() == roleMaster
+	param := make(evt.LEConnectionComplete, 19)
+	binary.LittleEndian.PutUint16(param[2:], handle)
+	c := newConn(h, param)
 	h.muConns.Lock()
 	h.conns[handle] = c
 	h.muConns.Unlock()
@@ -476,4 +482,90 @@ func TestRecombineDispatchesSignal(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("no ACL response to an unknown signaling code")
+}
+
+// ---------------------------------------------------------------------------
+// Fix: a lost Disconnect command must not leave a zombie conn
+// ---------------------------------------------------------------------------
+
+// TestCloseForceCleansUpLostDisconnect: the controller never answers the
+// Disconnect command (the truly-lost variant of the abandoned-command
+// family), so no DisconnectionComplete will ever arrive. Close must retry
+// once and then force-deregister the conn itself: Disconnected() fires, the
+// recombine goroutine winds down, h.conns empties, and the conn's TX
+// credits return to the shared pool. Before the fix Close swallowed the
+// send error and the conn stayed registered forever, with killOnce already
+// spent.
+func TestCloseForceCleansUpLostDisconnect(t *testing.T) {
+	quietLogger(t)
+	oldCmd, oldDisc := cmdTimeout, disconnectTimeout
+	cmdTimeout, disconnectTimeout = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { cmdTimeout, disconnectTimeout = oldCmd, oldDisc })
+
+	skt := newFakeSkt()
+	h := newTeardownHCI(t, skt)
+	// Two command credits so the retry reaches the wire instead of
+	// escalating through send's credit-starvation close.
+	h.setAllowedCommands(2)
+	c := addConn(h, 0x0040)
+	c.txBuffer.Get() // in-flight TX credit only teardown can return
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+	waitDisconnected(t, c)
+	if n := waitChInPDUClosed(t, c); n != 0 {
+		t.Fatalf("drained %d unexpected PDUs", n)
+	}
+	if n := connCount(h); n != 0 {
+		t.Fatalf("h.conns holds %d conns after force cleanup, want 0", n)
+	}
+	if n := len(h.pool.ch); n != 4 {
+		t.Fatalf("pool holds %d buffers after force cleanup, want 4", n)
+	}
+	if n := countDisconnectCmds(skt); n != 2 {
+		t.Fatalf("%d Disconnect commands reached the wire, want 2 (original + retry)", n)
+	}
+}
+
+// TestCloseLateEventBeatsForceCleanup: both command attempts time out, but
+// the DisconnectionComplete event straggles in during Close's bounded wait
+// (the abandoned command executed late). The event path must win — normal
+// teardown, no force-cleanup double work, and Close still returns nil.
+func TestCloseLateEventBeatsForceCleanup(t *testing.T) {
+	quietLogger(t)
+	oldCmd, oldDisc := cmdTimeout, disconnectTimeout
+	cmdTimeout, disconnectTimeout = 50*time.Millisecond, 5*time.Second
+	t.Cleanup(func() { cmdTimeout, disconnectTimeout = oldCmd, oldDisc })
+
+	skt := newFakeSkt()
+	h := newTeardownHCI(t, skt)
+	h.setAllowedCommands(2)
+	c := addConn(h, 0x0040)
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+
+	// Wait for both futile attempts, then deliver the straggling event.
+	deadline := time.Now().Add(2 * time.Second)
+	for countDisconnectCmds(skt) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not retry the Disconnect command")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	skt.rd <- disconnWirePkt(0x0040)
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the late event")
+	}
+	waitDisconnected(t, c)
+	if n := connCount(h); n != 0 {
+		t.Fatalf("h.conns holds %d conns, want 0", n)
+	}
 }
