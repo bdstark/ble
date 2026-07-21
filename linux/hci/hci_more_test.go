@@ -100,10 +100,10 @@ func (s *fakeSkt) written() [][]byte {
 func cmdCompletePkt(opcode int, status byte) []byte {
 	return []byte{
 		pktTypeEvent, evt.CommandCompleteCode,
-		4,                                  // parameter length
-		1,                                  // NumHCICommandPackets
-		byte(opcode), byte(opcode >> 8),    // CommandOpcode
-		status,                             // ReturnParameters
+		4,                               // parameter length
+		1,                               // NumHCICommandPackets
+		byte(opcode), byte(opcode >> 8), // CommandOpcode
+		status, // ReturnParameters
 	}
 }
 
@@ -147,10 +147,10 @@ func respondWithStatus(skt *fakeSkt, status byte) {
 // byte, and AD payload.
 func advReportPkt(evtTyp byte, addrLo byte, data []byte) []byte {
 	b := []byte{
-		0x02,   // subevent: LE Advertising Report
-		0x01,   // one report
-		evtTyp, // event type
-		0x00,   // public address
+		0x02,                                 // subevent: LE Advertising Report
+		0x01,                                 // one report
+		evtTyp,                               // event type
+		0x00,                                 // public address
 		addrLo, 0x02, 0x03, 0x04, 0x05, 0x06, // address
 		byte(len(data)),
 	}
@@ -210,8 +210,8 @@ func TestSendRoundTrip(t *testing.T) {
 	quietLogger(t)
 	skt := newFakeSkt()
 	// Processed (and logged) before the command reply below.
-	skt.rd <- []byte{pktTypeVendor, 0x01, 0x02}  // "unsupported vendor packet" branch
-	skt.rd <- []byte{pktTypeCommand, 0xAA}       // "failed to handle packet" branch
+	skt.rd <- []byte{pktTypeVendor, 0x01, 0x02} // "unsupported vendor packet" branch
+	skt.rd <- []byte{pktTypeCommand, 0xAA}      // "failed to handle packet" branch
 	respondWithStatus(skt, 0x00)
 	h := newLoopedHCI(t, skt)
 

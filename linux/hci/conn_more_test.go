@@ -156,8 +156,8 @@ func TestWritePDUClosedAtFlush(t *testing.T) {
 		var once sync.Once
 		skt.onWrite = func([]byte) {
 			once.Do(func() {
-				close(done)       // disconnect after the first fragment...
-				c.txBuffer.Put()  // ...which also returns its credit
+				close(done)      // disconnect after the first fragment...
+				c.txBuffer.Put() // ...which also returns its credit
 			})
 		}
 		_, err := c.writePDU(make([]byte, 6)) // two fragments: 4 + 2

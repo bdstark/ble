@@ -569,3 +569,28 @@ func TestCloseLateEventBeatsForceCleanup(t *testing.T) {
 		t.Fatalf("h.conns holds %d conns, want 0", n)
 	}
 }
+
+// TestCleanupConnSkipsStaleConn: cleanupConn keys on conn identity, not just
+// handle — a stale *Conn whose handle was since reused by a newer connection
+// must not tear the newer one down.
+func TestCleanupConnSkipsStaleConn(t *testing.T) {
+	skt := newFakeSkt()
+	h := newTeardownHCI(t, skt)
+	old := addConn(h, 0x0040)
+	h.muConns.Lock()
+	delete(h.conns, 0x0040) // old was torn down elsewhere...
+	h.muConns.Unlock()
+	fresh := addConn(h, 0x0040) // ...and the controller reused its handle
+	t.Cleanup(func() { old.closeChans() })
+
+	h.cleanupConn(old) // stale identity: must be a no-op
+
+	if n := connCount(h); n != 1 {
+		t.Fatalf("h.conns holds %d conns after stale cleanupConn, want 1", n)
+	}
+	select {
+	case <-fresh.Disconnected():
+		t.Fatal("cleanupConn tore down the newer conn under a reused handle")
+	default:
+	}
+}

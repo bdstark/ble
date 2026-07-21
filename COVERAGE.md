@@ -16,32 +16,32 @@ go test -count=1 -coverprofile=/tmp/cover.out -coverpkg=./...,github.com/bdstark
 python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 ```
 
-## Current state (2026-07-19, measured on macOS)
+## Current state (2026-07-21, measured on macOS)
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **92.0%** (988/1074) |
-| Added lines excluding `darwin/` | **99.4%** (988/994) |
+| All added lines | **90.6%** (1320/1457) |
+| Added lines excluding `darwin/` | **99.5%** (1306/1312) |
 
-Every changed file is at 100% of its added lines except the four below.
+Every changed file is at 100% of its added lines except the ones below.
 The linux backend is pure Go above the socket layer, so all of it —
 including `linux/hci` and `linux/att` — builds and tests on any platform.
 
-## Documented exclusions (why 90%+ overall is not attainable)
+## Documented exclusions (why 90%+ overall is barely attainable)
 
-**`darwin/` — 80 lines, 0% (the entire shortfall; `darwin/option.go` is
-now fully covered by the package's first unit tests).** The changed lines are
-`ctx.Done()` arms in selects that otherwise wait on CoreBluetooth delegate
-events, plus the context-threaded method signatures around them. The
-backend drives `cbgo`, whose peripheral/central types are concrete structs
-wrapping Objective-C objects — there is no seam to fake them, and reaching
-the changed arms requires a live CBCentralManager with a connected
+**`darwin/` — 131 uncovered lines (the entire shortfall; `darwin/option.go`
+and `darwin/event.go` are fully covered by unit tests).** The uncovered
+lines are `ctx.Done()` arms in selects that otherwise wait on CoreBluetooth
+delegate events, the context-threaded method signatures around them, the
+`awaitSlot` delegate-event waiter, and the delegate callbacks themselves.
+The backend drives `cbgo`, whose peripheral/central types are concrete
+structs wrapping Objective-C objects — there is no seam to fake them, and
+reaching the changed arms requires a live CBCentralManager with a connected
 peripheral (i.e. macOS Bluetooth entitlements plus real hardware within
 radio range, mid-transaction). These paths get exercised in development use
 of the darwin backend, not in CI. Covering them would require an
-integration rig, not unit tests. With all 45 lines excluded from the
-denominator the remaining new code sits at 98.2%; with them included the
-theoretical maximum for unit tests is 89.6%.
+integration rig, not unit tests. With them excluded from the denominator
+the remaining new code sits at 99.5%.
 
 **`linux/device.go` — 4 lines.**
 - `38` ("can't create server" wrap): `gatt.NewServerWithNameAndHandler`
@@ -55,7 +55,7 @@ theoretical maximum for unit tests is 89.6%.
   the HCI's unexported master-conn channel; hardware only.
 
 **`linux/hci/hci.go` — 1 line.**
-- `179` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
+- `180` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
   first and cannot get past that without a device; `advDispatcher` itself
   is fully covered by direct tests. (The former exclusion for `send`'s
   `h.err` done-arm is gone: with `h.err` behind `muErr` the arm is
@@ -63,7 +63,7 @@ theoretical maximum for unit tests is 89.6%.
   conn.go is gone too: the `(int, error)` rework landed with tests.)
 
 **`linux/hci/gap.go` — 1 line.**
-- `74` (`sr.Append(adv.ShortName(name))` arm): structurally dead upstream
+- `92` (`sr.Append(adv.ShortName(name))` arm): structurally dead upstream
   code — ShortName appends the full string under the identical length
   check the preceding CompleteName case just failed, so the arm can never
   match. Entered the diff via a rename only; making it reachable would
@@ -84,8 +84,8 @@ Pi), `examples/`, generated `*_gen.go`, and test files themselves.
 The bounded waits are this fork's reason to exist, so their timeout
 branches are unit-tested by lowering the package-level duration vars
 (`hci.ACLWriteTimeout`, `hci.cmdTimeout`, `hci.connCancelTimeout`,
-`att.seqProtoTimeout`) — never by waiting wall-clock time. Keep new
-timeouts in that pattern.
+`hci.disconnectTimeout`, `att.seqProtoTimeout`) — never by waiting
+wall-clock time. Keep new timeouts in that pattern.
 
 ## Bugs found by writing these tests
 
@@ -93,7 +93,25 @@ timeouts in that pattern.
   PDU) — inherited from upstream, fixed here.
 - `att.Client.PrepareWrite` sent stale buffer bytes instead of the part
   value — inherited from upstream, fixed here.
-- `hci.CommandReject.Marshal` always fails (`binary.Write` rejects its
+- `hci.CommandReject.Marshal` always failed (`binary.Write` rejects its
   variable-length `Data []byte` field), so the MTU-exceeded Command Reject
-  in `handleSignal` is never actually sent; the error-log path is what's
-  covered. Inherited from upstream; not yet fixed.
+  in `handleSignal` was never actually sent. Inherited from upstream,
+  fixed here (hand-encoded, with wire tests in linux/hci/signal_test.go).
+- `att.Client.Loop` acted on zero-length reads — a header-only L2CAP frame
+  arrives as `(0, nil)` — classifying garbage on a stale byte of the
+  previous PDU; with a request pending, the resulting empty PDU panicked
+  `sendReq`. Runt (< 3 byte) notifications/indications likewise reached
+  the gatt dispatcher's unconditional handle parse. Inherited from
+  upstream, fixed here.
+- `gatt.Client` discovery trusted the peer-controlled entry length byte
+  (`DiscoverServices` sliced `b[2:4]`/`b[4:length]` for any length passing
+  the divisibility check) and `att.FindInformation` accepted undefined
+  format bytes. Both remotely panickable; inherited from upstream, fixed
+  here.
+- `ble.ATTError(0x11).Error()` ("insufficient resources", the last named
+  code) fell through to "unknown error". Inherited; fixed here.
+- `darwin` event slots deadlocked cbgo's dispatch-queue thread when a
+  waiter abandoned via ctx.Done while a callback was delivering
+  (unbuffered send under the slot mutex vs. the waiter's deferred Close).
+  Introduced by the ctx work, fixed here (buffered slots, non-blocking
+  delivery, closed-slot-means-disconnected receivers).

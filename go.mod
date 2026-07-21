@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/JuulLabs-OSS/cbgo v0.0.1
-	golang.org/x/sys v0.0.0-20211204120058-94396e421777
+	golang.org/x/sys v0.30.0
 )
 
 require (
