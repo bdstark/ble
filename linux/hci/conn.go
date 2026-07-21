@@ -313,13 +313,18 @@ func (c *Conn) writePDU(pdu []byte) (int, error) {
 
 	// All L2CAP fragments associated with an L2CAP PDU shall be processed for
 	// transmission by the Controller before any other L2CAP PDU for the same
-	// logical transport shall be processed.
+	// logical transport shall be processed. The train mutex is per
+	// connection — that is exactly the spec's scope ("the same logical
+	// transport"), and it keeps this train's credit wait from ever blocking
+	// sktLoop, which reclaims other (dead) connections' credits.
 	c.txBuffer.lock()
 	defer c.txBuffer.unlock()
 
-	// Fail immediately if the connection is already closed
-	// Check this with the pool locked to avoid race conditions
-	// with handleDisconnectionComplete
+	// Fail immediately if the connection is already closed. Checked with
+	// the train mutex held: teardown closes chDone before ReclaimAll takes
+	// this mutex, so either the closed chDone is visible here (or in
+	// GetTimeout's done arm below), or ReclaimAll is still waiting on this
+	// mutex and cannot drain buffers this train is about to enqueue.
 	select {
 	case <-c.chDone:
 		return 0, ErrClosed

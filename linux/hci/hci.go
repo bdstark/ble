@@ -510,7 +510,8 @@ func (h *HCI) cleanupConns() {
 		// handleDisconnectionComplete does: with the transport gone no
 		// NumberOfCompletedPackets event will ever return them, and a
 		// writer mid-writePDU must not leak buffers from the shared
-		// pool (hence the pool lock).
+		// pool (hence the per-conn train mutex ReclaimAll takes, with
+		// chDone already closed so the writer exits promptly).
 		c.txBuffer.ReclaimAll()
 	}
 }
@@ -924,9 +925,10 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 	// When a connection disconnects, all the sent packets and weren't acked yet
 	// will be recycled. [Vol2, Part E 4.1.1]
 	//
-	// must be done with the pool locked to avoid race conditions where
-	// writePDU is in progress and does a Get from the pool after this completes,
-	// leaking a buffer from the main pool.
+	// ReclaimAll serializes against an in-flight writePDU train on this
+	// conn via the per-conn train mutex; closeChans above closed chDone
+	// first, so such a train exits its credit wait promptly instead of
+	// holding the mutex for the full ACLWriteTimeout.
 	c.txBuffer.ReclaimAll()
 	if h.disconnectedHandler != nil {
 		h.disconnectedHandler(e)

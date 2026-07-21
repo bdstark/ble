@@ -9,8 +9,6 @@ import (
 
 // Pool ...
 type Pool struct {
-	sync.Mutex
-
 	sz  int
 	cnt int
 	ch  chan *bytes.Buffer
@@ -31,6 +29,15 @@ func NewPool(sz int, cnt int) *Pool {
 // tears down). It is not a BLE client — despite the historical name it
 // replaces, it has nothing to do with att/gatt/ble.Client.
 type txCredits struct {
+	// mu serializes this connection's fragment trains (writePDU holds it
+	// across a whole PDU, per [Vol 3, Part A, 7.2.1] — fragments of one
+	// PDU must not interleave with another PDU on the SAME logical
+	// transport) and teardown's ReclaimAll. It is deliberately
+	// per-connection, not the shared pool's: sktLoop runs ReclaimAll, and
+	// one connection's 20s credit wait must never block sktLoop — that
+	// stalls every connection's events, including the very
+	// NumberOfCompletedPackets that would refill the pool.
+	mu   sync.Mutex
 	p    *Pool
 	sent chan *bytes.Buffer
 }
@@ -40,13 +47,15 @@ func newTxCredits(p *Pool) *txCredits {
 	return &txCredits{p: p, sent: make(chan *bytes.Buffer, p.cnt)}
 }
 
-// lock/unlock guard the shared pool for a multi-step critical section
+// lock/unlock guard this connection's fragment-train critical section
 // (writePDU holds it across a whole fragment train). Single-step reclaim
 // should use ReclaimAll, which locks internally.
-func (c *txCredits) lock()   { c.p.Lock() }
-func (c *txCredits) unlock() { c.p.Unlock() }
+func (c *txCredits) lock()   { c.mu.Lock() }
+func (c *txCredits) unlock() { c.mu.Unlock() }
 
-// Get returns a buffer from the shared buffer pool.
+// Get returns a buffer from the shared buffer pool, blocking indefinitely.
+// Production TX uses GetTimeout; this remains for tests that need to park
+// credits on a connection.
 func (c *txCredits) Get() *bytes.Buffer {
 	b := <-c.p.ch
 	b.Reset()
@@ -88,12 +97,17 @@ func (c *txCredits) Put() {
 	}
 }
 
-// ReclaimAll returns every in-flight buffer to the shared pool, locking the
-// pool internally. Used by the teardown paths, which have no other reason to
-// hold the pool lock.
+// ReclaimAll returns every in-flight buffer to the shared pool. It takes the
+// connection's train mutex, so it cannot drain c.sent while a writePDU train
+// on the SAME connection is mid-flight — buffers that train still holds stay
+// out of the pool until it finishes. Liveness: both teardown paths close
+// chDone (closeChans) before calling this, so a train parked in GetTimeout
+// wakes through its done arm and releases the mutex promptly rather than
+// after the full credit timeout. Trains on OTHER connections are unaffected
+// — they hold their own mutex, never this one.
 func (c *txCredits) ReclaimAll() {
-	c.p.Lock()
-	defer c.p.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for {
 		select {
 		case b := <-c.sent:

@@ -79,3 +79,58 @@ func TestGetTimeoutExpiresPromptly(t *testing.T) {
 		t.Fatalf("timeout path took %v", elapsed)
 	}
 }
+
+// TestReclaimAllDoesNotBlockBehindAnotherConnsCreditWait pins the stall the
+// per-connection train mutex removes. Setup mirrors the field scenario: a
+// dead connection (A) holds every credit of the shared pool, a writer on a
+// healthy connection (B) is parked in its fragment train's credit wait
+// exactly as writePDU parks (train mutex held, GetTimeout pending), and
+// sktLoop then processes A's DisconnectionComplete — ReclaimAll(A). With the
+// old shared-pool lock, ReclaimAll queued behind B's wait, freezing sktLoop
+// (all connections) for the full ACLWriteTimeout; per-conn mutexes let A's
+// reclaim run immediately, which in turn feeds B's wait.
+func TestReclaimAllDoesNotBlockBehindAnotherConnsCreditWait(t *testing.T) {
+	pool := NewPool(4, 2)
+	a := newTxCredits(pool)
+	b := newTxCredits(pool)
+
+	// Connection A dies with both pool buffers in flight, un-acked.
+	a.Get()
+	a.Get()
+
+	// Connection B's writer enters its fragment train: train mutex held
+	// across the credit wait, like writePDU.
+	bGot := make(chan error, 1)
+	bWaiting := make(chan struct{})
+	go func() {
+		b.lock()
+		defer b.unlock()
+		close(bWaiting)
+		_, err := b.GetTimeout(make(chan struct{}), 5*time.Second)
+		bGot <- err
+	}()
+	<-bWaiting
+
+	// "sktLoop": A's DisconnectionComplete arrives; its credits must be
+	// reclaimed without waiting out B's credit timeout.
+	reclaimed := make(chan struct{})
+	go func() {
+		a.ReclaimAll()
+		close(reclaimed)
+	}()
+	select {
+	case <-reclaimed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReclaimAll blocked behind another connection's credit wait")
+	}
+
+	// And the reclaimed credits satisfy B's pending acquire.
+	select {
+	case err := <-bGot:
+		if err != nil {
+			t.Fatalf("GetTimeout after cross-conn reclaim = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reclaimed credits never reached the waiting connection")
+	}
+}
