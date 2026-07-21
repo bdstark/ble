@@ -183,12 +183,21 @@ func (c *Client) FindInformation(ctx context.Context, starth, endh uint16) (fmt 
 		return 0x00, nil, err
 	}
 
-	// The information data must hold complete entries of the declared format.
+	// The information data must hold complete entries of the declared
+	// format, and the format itself must be one the spec defines — an
+	// unknown format would make the caller guess an entry size and walk
+	// off the end of the data.
 	rsp := FindInformationResponse(b)
-	switch {
-	case rsp.Format() == 0x01 && ((len(rsp)-2)%4) != 0:
-		fallthrough
-	case rsp.Format() == 0x02 && ((len(rsp)-2)%18) != 0:
+	switch rsp.Format() {
+	case 0x01:
+		if ((len(rsp) - 2) % 4) != 0 {
+			return 0x00, nil, ErrInvalidResponse
+		}
+	case 0x02:
+		if ((len(rsp) - 2) % 18) != 0 {
+			return 0x00, nil, ErrInvalidResponse
+		}
+	default:
 		return 0x00, nil, ErrInvalidResponse
 	}
 	return int(rsp.Format()), rsp.InformationData(), nil
@@ -585,8 +594,29 @@ func (c *Client) Loop() {
 			c.chErr <- err
 			return
 		}
+		if n == 0 {
+			// A header-only L2CAP frame is delivered as (0, nil): there is
+			// no ATT opcode, and c.rxBuf[0] is a stale byte from the
+			// previous PDU. Classifying on it would ship an empty PDU as a
+			// response (sendReq indexes rsp[0]) or as a notification (the
+			// gatt dispatcher parses a handle from it) — both panic.
+			ble.Logger.Warn("client: dropping zero-length ATT PDU")
+			continue
+		}
 
 		op := c.rxBuf[0]
+
+		if (op == HandleValueNotificationCode || op == HandleValueIndicationCode) && n < 3 {
+			// Opcode + 2-byte attribute handle is the spec minimum
+			// [Vol 3, Part F, 3.4.7.1-2]; anything shorter would panic the
+			// handle parse downstream. Still acknowledge a runt indication
+			// so the peer's sequential protocol isn't left waiting on us.
+			ble.Logger.Warn("client: dropping runt notification/indication", "len", n)
+			if op == HandleValueIndicationCode {
+				_, _ = c.l2c.Write(confirmation)
+			}
+			continue
+		}
 
 		if (op != ExchangeMTURequestCode) && (op != HandleValueNotificationCode) && (op != HandleValueIndicationCode) {
 			// Response PDU: it escapes to the sendReq caller and, aliased,

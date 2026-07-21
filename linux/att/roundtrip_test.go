@@ -51,6 +51,12 @@ func TestRoundTripInvalidResponses(t *testing.T) {
 	if _, _, err := c.FindInformation(ctx, 1, 0xFFFF); err != ErrInvalidResponse {
 		t.Errorf("FindInformation format-2 ragged rsp = %v, want ErrInvalidResponse", err)
 	}
+	// An undefined format byte must be rejected too: the caller derives the
+	// entry stride from it and would walk off the end of the data list.
+	respondWith(f, []byte{FindInformationResponseCode, 0x03, 0x01, 0x00, 0x00, 0x28})
+	if _, _, err := c.FindInformation(ctx, 1, 0xFFFF); err != ErrInvalidResponse {
+		t.Errorf("FindInformation unknown-format rsp = %v, want ErrInvalidResponse", err)
+	}
 	respondWith(f, []byte{ReadByTypeResponseCode, 0x04, 0x01, 0x00, 0xAA})
 	if _, _, err := c.ReadByType(ctx, 1, 0xFFFF, ble.UUID16(0x2A00)); err != ErrInvalidResponse {
 		t.Errorf("ReadByType ragged rsp = %v, want ErrInvalidResponse", err)

@@ -477,3 +477,47 @@ func TestSubscribeNoCCCDSentinel(t *testing.T) {
 		t.Fatalf("Unsubscribe without CCCD = %v, want ErrNoCCCD", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Peer-controlled entry lengths in discovery responses
+// ---------------------------------------------------------------------------
+
+// A Read By Group Type entry length other than 6 (16-bit UUID) or 20 (128-bit
+// UUID) cannot be a service entry; slicing on it used to panic.
+func TestDiscoverServicesRejectsInvalidEntryLength(t *testing.T) {
+	cln := newRespondingClient(t, func(req []byte) []byte {
+		if req[0] == att.ReadByGroupTypeRequestCode {
+			// length=2 with one complete 2-byte "entry": passes the att
+			// layer's divisibility check, reaches the gatt parser.
+			return []byte{att.ReadByGroupTypeResponseCode, 0x02, 0xAA, 0xBB}
+		}
+		return nil
+	})
+	if _, err := cln.DiscoverServices(testCtx(t), nil); err == nil {
+		t.Fatal("DiscoverServices accepted an invalid entry length")
+	}
+}
+
+// A Read By Type entry length other than 7 or 21 cannot be a characteristic
+// declaration; slicing on it used to panic.
+func TestDiscoverCharacteristicsRejectsInvalidEntryLength(t *testing.T) {
+	cln := newRespondingClient(t, func(req []byte) []byte {
+		if req[0] == att.ReadByTypeRequestCode {
+			return []byte{att.ReadByTypeResponseCode, 0x03, 0xAA, 0xBB, 0xCC}
+		}
+		return nil
+	})
+	svc := &ble.Service{Handle: 1, EndHandle: 10}
+	if _, err := cln.DiscoverCharacteristics(testCtx(t), nil, svc); err == nil {
+		t.Fatal("DiscoverCharacteristics accepted an invalid entry length")
+	}
+}
+
+// HandleNotification is an exported entry point: PDUs below the spec minimum
+// (opcode + 2-byte handle) must be dropped, not parsed.
+func TestHandleNotificationRunt(t *testing.T) {
+	cln, _ := newTestClient(t)
+	for _, pdu := range [][]byte{{}, {att.HandleValueNotificationCode}, {att.HandleValueIndicationCode, 0x42}} {
+		cln.HandleNotification(pdu) // must not panic
+	}
+}

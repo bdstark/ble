@@ -39,7 +39,7 @@ const (
 
 func (e ATTError) Error() string {
 	switch i := int(e); {
-	case i < 0x11:
+	case i <= 0x11:
 		return errName[e]
 	case i >= 0x12 && i <= 0x7F: // Reserved for future use.
 		return fmt.Sprintf("reserved error code (0x%02X)", i)

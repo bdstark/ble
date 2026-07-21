@@ -249,3 +249,82 @@ func TestPrepareWriteSendReqError(t *testing.T) {
 		t.Fatalf("PrepareWrite = %v, want ErrSeqProtoTimeout", err)
 	}
 }
+
+// countNotifyHandler counts deliveries and records the last payload length.
+type countNotifyHandler struct {
+	calls   atomic.Uint64
+	lastLen atomic.Int64
+}
+
+func (h *countNotifyHandler) HandleNotification(req []byte) {
+	h.lastLen.Store(int64(len(req)))
+	h.calls.Add(1)
+}
+
+// TestLoopDropsZeroLengthPDU: a header-only L2CAP frame reaches Loop as
+// (0, nil). Loop must drop it rather than classify on the stale first byte
+// of the previous PDU — with a request pending, the stale byte reads as a
+// response opcode and the resulting empty PDU used to panic sendReq's
+// rsp[0] access.
+func TestLoopDropsZeroLengthPDU(t *testing.T) {
+	f := newOnceConn()
+	c := startClient(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Prime rxBuf[0] with ReadResponseCode via a successful request.
+	go func() {
+		<-f.writes
+		f.in <- []byte{ReadResponseCode, 0xAA}
+	}()
+	if v, err := c.Read(ctx, 1); err != nil || len(v) != 1 || v[0] != 0xAA {
+		t.Fatalf("priming Read = % X, %v", v, err)
+	}
+
+	// While the next request is pending, deliver a zero-length PDU (stale
+	// rxBuf[0] still holds ReadResponseCode), then the real response.
+	go func() {
+		<-f.writes
+		f.in <- []byte{}
+		f.in <- []byte{ReadResponseCode, 0xBB}
+	}()
+	v, err := c.Read(ctx, 1)
+	if err != nil || len(v) != 1 || v[0] != 0xBB {
+		t.Fatalf("Read after zero-length PDU = % X, %v, want BB, nil", v, err)
+	}
+}
+
+// TestLoopDropsRuntNotificationAndIndication: notification/indication PDUs
+// below the spec minimum (opcode + 2-byte handle) must be dropped before
+// dispatch — the gatt dispatcher parses the handle unconditionally — and a
+// runt indication must still be confirmed so the peer's sequential protocol
+// isn't left waiting.
+func TestLoopDropsRuntNotificationAndIndication(t *testing.T) {
+	f := newOnceConn()
+	h := &countNotifyHandler{}
+	c := NewClient(f, h)
+	done := make(chan struct{})
+	go func() { c.Loop(); close(done) }()
+	t.Cleanup(func() {
+		f.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("client Loop did not exit")
+		}
+	})
+
+	f.in <- []byte{HandleValueNotificationCode}     // opcode only
+	f.in <- []byte{HandleValueIndicationCode, 0x42} // truncated handle
+	if w := recvWrite(t, f.writes); w[0] != HandleValueConfirmationCode {
+		t.Fatalf("runt indication answered with % X, want confirmation", w)
+	}
+
+	// A well-formed notification must still be delivered — and be the only
+	// delivery, proving the runts never reached the handler.
+	f.in <- []byte{HandleValueNotificationCode, 0x42, 0x00, 0xAB}
+	waitCond(t, func() bool { return h.calls.Load() == 1 })
+	if got := h.lastLen.Load(); got != 4 {
+		t.Errorf("delivered payload length = %d, want 4", got)
+	}
+}

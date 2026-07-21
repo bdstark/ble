@@ -150,6 +150,12 @@ func (p *Client) DiscoverServices(ctx context.Context, filter []ble.UUID) ([]*bl
 		if err != nil {
 			return nil, err
 		}
+		// Service entry [Vol 3, Part G, 4.4.1]: attribute handle (2) +
+		// end group handle (2) + service UUID (2 or 16). length is
+		// peer-controlled; any other value would walk b out of bounds.
+		if length != 6 && length != 20 {
+			return nil, fmt.Errorf("gatt: service entry has invalid length %d", length)
+		}
 		for len(b) != 0 {
 			h := binary.LittleEndian.Uint16(b[:2])
 			endh := binary.LittleEndian.Uint16(b[2:4])
@@ -245,6 +251,12 @@ func (p *Client) DiscoverCharacteristics(ctx context.Context, filter []ble.UUID,
 			break
 		} else if err != nil {
 			return nil, err
+		}
+		// Characteristic entry [Vol 3, Part G, 4.6.1]: attribute handle (2)
+		// + properties (1) + value handle (2) + UUID (2 or 16). length is
+		// peer-controlled; any other value would walk b out of bounds.
+		if length != 7 && length != 21 {
+			return nil, fmt.Errorf("gatt: characteristic entry has invalid length %d", length)
 		}
 		for len(b) != 0 {
 			h := binary.LittleEndian.Uint16(b[:2])
@@ -518,6 +530,13 @@ func (p *Client) Conn() ble.Conn {
 // snapshot: a handler already being dispatched may be invoked once more
 // after Unsubscribe (or ClearSubscriptions) returns.
 func (p *Client) HandleNotification(req []byte) {
+	if len(req) < 3 {
+		// Opcode + 2-byte attribute handle is the spec minimum. att.Client
+		// drops runts before dispatch; this guards the exported entry point
+		// against other callers.
+		ble.Logger.Warn("gatt: dropping runt notification/indication", "len", len(req))
+		return
+	}
 	vh := att.HandleValueIndication(req).AttributeHandle()
 	p.subsMu.RLock()
 	sub, ok := p.subs[vh]
