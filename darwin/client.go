@@ -46,6 +46,28 @@ func (cln *Client) Addr() ble.Addr {
 	return cln.conn.RemoteAddr()
 }
 
+// awaitSlot waits for a single delegate event on ch (from eventSlot.Listen).
+// It returns the event's error (nil on success), ctx.Err() if the caller's
+// wait expired, or a disconnected error if the link dropped or the slot was
+// closed under the waiter by connection teardown — a closed slot must never
+// read as a successful event.
+func (cln *Client) awaitSlot(ctx context.Context, ch chan any) error {
+	select {
+	case itf, ok := <-ch:
+		if !ok {
+			return fmt.Errorf("disconnected")
+		}
+		if itf != nil {
+			return itf.(error)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-cln.Disconnected():
+		return fmt.Errorf("disconnected")
+	}
+}
+
 // Name returns the name of the remote peripheral.
 // This can be the advertised name, if exists, or the GAP device name, which takes priority.
 func (cln *Client) Name() string {
@@ -91,17 +113,8 @@ func (cln *Client) DiscoverServices(ctx context.Context, ss []ble.UUID) ([]*ble.
 	cbuuids := uuidsToCbgoUUIDs(ss)
 	cln.conn.prph.DiscoverServices(cbuuids)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return nil, itf.(error)
-		}
-
-	case <-ctx.Done():
-		return nil, ctx.Err()
-
-	case <-cln.Disconnected():
-		return nil, fmt.Errorf("disconnected")
+	if err := cln.awaitSlot(ctx, ch); err != nil {
+		return nil, err
 	}
 
 	svcs := []*ble.Service{}
@@ -138,17 +151,8 @@ func (cln *Client) DiscoverCharacteristics(ctx context.Context, cs []ble.UUID, s
 	cbuuids := uuidsToCbgoUUIDs(cs)
 	cln.conn.prph.DiscoverCharacteristics(cbuuids, cbsvc)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return nil, itf.(error)
-		}
-
-	case <-ctx.Done():
-		return nil, ctx.Err()
-
-	case <-cln.Disconnected():
-		return nil, fmt.Errorf("disconnected")
+	if err := cln.awaitSlot(ctx, ch); err != nil {
+		return nil, err
 	}
 
 	for _, dchr := range cbsvc.Characteristics() {
@@ -175,17 +179,8 @@ func (cln *Client) DiscoverDescriptors(ctx context.Context, ds []ble.UUID, c *bl
 
 	cln.conn.prph.DiscoverDescriptors(cbchr)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return nil, itf.(error)
-		}
-
-	case <-ctx.Done():
-		return nil, ctx.Err()
-
-	case <-cln.Disconnected():
-		return nil, fmt.Errorf("disconnected")
+	if err := cln.awaitSlot(ctx, ch); err != nil {
+		return nil, err
 	}
 
 	for _, ddsc := range cbchr.Descriptors() {
@@ -214,12 +209,14 @@ func (cln *Client) ReadCharacteristic(ctx context.Context, c *ble.Characteristic
 	cln.conn.prph.ReadCharacteristic(cbchr)
 
 	select {
-	case itf := <-ch:
-		if itf != nil {
-			return nil, itf.(error)
+	case err := <-ch:
+		if err != nil {
+			return nil, err
 		}
 
 	case <-ctx.Done():
+		// Abandon the wait; the deferred delChrReader deregisters the
+		// channel, and a late response's buffered send is simply GC'd.
 		return nil, ctx.Err()
 
 	case <-cln.Disconnected():
@@ -253,20 +250,7 @@ func (cln *Client) WriteCharacteristic(ctx context.Context, c *ble.Characteristi
 
 	cln.conn.prph.WriteCharacteristic(b, cbchr, true)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return itf.(error)
-		}
-
-	case <-ctx.Done():
-		return ctx.Err()
-
-	case <-cln.Disconnected():
-		return fmt.Errorf("disconnected")
-	}
-
-	return nil
+	return cln.awaitSlot(ctx, ch)
 }
 
 // ReadDescriptor reads a characteristic descriptor from a server. [Vol 3, Part G, 4.12.1]
@@ -281,17 +265,8 @@ func (cln *Client) ReadDescriptor(ctx context.Context, d *ble.Descriptor) ([]byt
 
 	cln.conn.prph.ReadDescriptor(cbdsc)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return nil, itf.(error)
-		}
-
-	case <-ctx.Done():
-		return nil, ctx.Err()
-
-	case <-cln.Disconnected():
-		return nil, fmt.Errorf("disconnected")
+	if err := cln.awaitSlot(ctx, ch); err != nil {
+		return nil, err
 	}
 
 	d.Value = cbdsc.Value()
@@ -311,43 +286,17 @@ func (cln *Client) WriteDescriptor(ctx context.Context, d *ble.Descriptor, b []b
 
 	cln.conn.prph.WriteDescriptor(b, cbdsc)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return itf.(error)
-		}
-
-	case <-ctx.Done():
-		return ctx.Err()
-
-	case <-cln.Disconnected():
-		return fmt.Errorf("disconnected")
-	}
-
-	return nil
+	return cln.awaitSlot(ctx, ch)
 }
 
 // ReadRSSI retrieves the current RSSI value of the remote peripheral, in
-// dBm. [Vol 2, Part E, 7.5.4] The CoreBluetooth callback wait is bounded by
-// the connection's lifetime, not by ctx; per the ble.Client contract, ctx
-// bounds only this caller's wait — on expiry ctx.Err() is returned and the
-// callback's eventual result is discarded.
+// dBm. [Vol 2, Part E, 7.5.4] ctx bounds this caller's wait; on expiry the
+// slot is abandoned and the callback's late result is discarded. (The old
+// wrapper goroutine that outlived ctx held its Listen open, and its
+// deferred Close then tore down the NEXT ReadRSSI's freshly created slot —
+// abandoning in place has no cross-call aftermath.)
 func (cln *Client) ReadRSSI(ctx context.Context) (int, error) {
-	type result struct {
-		rssi int
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		rssi, err := cln.conn.ReadRSSI()
-		ch <- result{rssi, err}
-	}()
-	select {
-	case r := <-ch:
-		return r.rssi, r.err
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	}
+	return cln.conn.readRSSI(ctx)
 }
 
 // ExchangeMTU set the ATT_MTU to the maximum possible value that can be
@@ -372,20 +321,9 @@ func (cln *Client) Subscribe(ctx context.Context, c *ble.Characteristic, ind boo
 
 	cln.conn.prph.SetNotify(true, cbchr)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			cln.conn.delSub(c)
-			return itf.(error)
-		}
-
-	case <-ctx.Done():
+	if err := cln.awaitSlot(ctx, ch); err != nil {
 		cln.conn.delSub(c)
-		return ctx.Err()
-
-	case <-cln.Disconnected():
-		cln.conn.delSub(c)
-		return fmt.Errorf("disconnected")
+		return err
 	}
 
 	return nil
@@ -404,17 +342,8 @@ func (cln *Client) Unsubscribe(ctx context.Context, c *ble.Characteristic, ind b
 
 	cln.conn.prph.SetNotify(false, cbchr)
 
-	select {
-	case itf := <-ch:
-		if itf != nil {
-			return itf.(error)
-		}
-
-	case <-ctx.Done():
-		return ctx.Err()
-
-	case <-cln.Disconnected():
-		return fmt.Errorf("disconnected")
+	if err := cln.awaitSlot(ctx, ch); err != nil {
+		return err
 	}
 
 	cln.conn.delSub(c)
@@ -424,7 +353,15 @@ func (cln *Client) Unsubscribe(ctx context.Context, c *ble.Characteristic, ind b
 
 // ClearSubscriptions clears all subscriptions to notifications and indications.
 func (cln *Client) ClearSubscriptions(ctx context.Context) error {
+	// Snapshot under the conn lock: addSub/delSub mutate the map, and
+	// Unsubscribe below calls delSub itself.
+	cln.conn.RLock()
+	subs := make([]*sub, 0, len(cln.conn.subs))
 	for _, s := range cln.conn.subs {
+		subs = append(subs, s)
+	}
+	cln.conn.RUnlock()
+	for _, s := range subs {
 		if err := cln.Unsubscribe(ctx, s.char, false); err != nil {
 			return err
 		}

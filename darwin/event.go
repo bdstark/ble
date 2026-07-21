@@ -7,17 +7,29 @@ import (
 // eventSlot is a receiver for asynchronous events from CoreBluetooth.  To
 // prevent deadlock in the case of spurious events, eventSlot discards incoming
 // signals if it is not explicitly listening for them.
+//
+// The slot channel is buffered (capacity 1) and RxSignal never blocks. This
+// is load-bearing: RxSignal runs on cbgo's dispatch-queue thread, and the
+// waiter may have abandoned the slot via ctx.Done with its deferred Close
+// still pending. With an unbuffered channel that interleaving parked the
+// dispatch thread in the send while Close waited on the mutex the sender
+// held — a mutual deadlock that froze every CoreBluetooth callback in the
+// process.
 type eventSlot struct {
 	ch  chan any
 	mtx sync.Mutex
 }
 
+// closeNoLock abandons the current listen: any delivered-but-unconsumed
+// signal is discarded, and a waiter still selecting on the channel sees it
+// closed (receives ok=false — waiters must treat that as "slot torn down",
+// not as a successful zero-value event).
 func (e *eventSlot) closeNoLock() {
 	if e.ch == nil {
 		return
 	}
 
-	// Drain channel.
+	// Drain the (possibly) buffered, unconsumed signal.
 	for len(e.ch) > 0 {
 		<-e.ch
 	}
@@ -43,13 +55,16 @@ func (e *eventSlot) Listen() chan any {
 		e.closeNoLock()
 	}
 
-	e.ch = make(chan any)
+	e.ch = make(chan any, 1)
 	return e.ch
 }
 
 // RxSignal causes the event slot to process the given signal (i.e., it sends a
-// signal to the slot).  It blocks until the signal is consumed by a client or
-// until the slot is closed.
+// signal to the slot). It never blocks: the signal lands in the channel's
+// buffer and the slot stops listening. The channel is closed WITHOUT
+// draining, so a waiter's single receive still yields the value (a receive
+// on a closed channel drains the buffer first); only a subsequent Close —
+// an abandoning waiter's deferred cleanup — discards it.
 func (e *eventSlot) RxSignal(sig any) {
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
@@ -59,10 +74,9 @@ func (e *eventSlot) RxSignal(sig any) {
 		return
 	}
 
-	e.ch <- sig
-
-	// Stop listening.
-	e.closeNoLock()
+	e.ch <- sig // cap 1, one signal per Listen: never blocks
+	close(e.ch)
+	e.ch = nil
 }
 
 type eventConnected struct {

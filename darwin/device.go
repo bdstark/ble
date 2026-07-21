@@ -195,6 +195,11 @@ func (d *Device) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	d.cm.Connect(prphs[0], nil)
 	select {
 	case <-ctx.Done():
+		// Withdraw the pending connect: CoreBluetooth never times one out
+		// on its own, and an ownerless connect completing later would
+		// register a conn that fails every retry Dial with "already
+		// exists" until the peer itself drops the link.
+		d.cm.CancelConnect(prphs[0])
 		return nil, ctx.Err()
 	case itf := <-ch:
 		if itf == nil {
@@ -256,6 +261,16 @@ func (d *Device) connectFail(err error) {
 	d.evl.connected.RxSignal(&eventConnected{
 		err: err,
 	})
+}
+
+// DidFailToConnectPeripheral delivers a refused or failed connect to the
+// Dial waiting on the connected slot. Without it a failed connect never
+// signaled Dial at all, which just waited out its ctx.
+func (d *Device) DidFailToConnectPeripheral(cmgr cbgo.CentralManager, prph cbgo.Peripheral, err error) {
+	if err == nil {
+		err = fmt.Errorf("connect failed")
+	}
+	d.connectFail(err)
 }
 
 func chrPropPerm(c *ble.Characteristic) (cbgo.CharacteristicProperties, cbgo.AttributePermissions) {

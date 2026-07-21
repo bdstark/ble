@@ -64,6 +64,10 @@ func (d *Device) DidConnectPeripheral(cmgr cbgo.CentralManager, prph cbgo.Periph
 	c, err := newCentralConn(d, prph)
 	if err != nil {
 		fail(err)
+		// Without this return the error signal was followed by a nil-conn
+		// "success" signal — harmless only because the slot stops
+		// listening after the first one.
+		return
 	}
 
 	d.evl.connected.RxSignal(&eventConnected{

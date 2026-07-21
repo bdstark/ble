@@ -1,8 +1,8 @@
 package darwin
 
 import (
-	"github.com/bdstark/ble"
 	"github.com/JuulLabs-OSS/cbgo"
+	"github.com/bdstark/ble"
 )
 
 func uuidSlice(uu []ble.UUID) [][]byte {

@@ -143,8 +143,14 @@ func (c *conn) Disconnected() <-chan struct{} {
 
 // ReadRSSI retrieves the current RSSI value of the remote peripheral, in
 // dBm. [Vol 2, Part E, 7.5.4] The value and error come straight from the
-// CoreBluetooth didReadRSSI callback (see Client.DidReadRSSI).
+// CoreBluetooth didReadRSSI callback (see Client.DidReadRSSI). The wait is
+// bounded by the connection's lifetime (the ble.Conn signature carries no
+// ctx); Client.ReadRSSI threads its ctx through readRSSI directly.
 func (c *conn) ReadRSSI() (int, error) {
+	return c.readRSSI(context.Background())
+}
+
+func (c *conn) readRSSI(ctx context.Context) (int, error) {
 	ch := c.evl.rssiRead.Listen()
 	defer c.evl.rssiRead.Close()
 
@@ -161,6 +167,10 @@ func (c *conn) ReadRSSI() (int, error) {
 			return 0, ev.err
 		}
 		return ev.rssi, nil
+	case <-ctx.Done():
+		// Abandon the wait; the deferred Close discards the callback's
+		// late signal (the slot send is buffered and never blocks).
+		return 0, ctx.Err()
 	case <-c.done:
 		return 0, fmt.Errorf("disconnected")
 	}
@@ -194,7 +204,19 @@ func (c *conn) processChrRead(err error, cbchr cbgo.Characteristic) {
 
 	ch := c.chrReads[uuidStr]
 	if ch != nil {
-		ch <- err
+		// Non-blocking: this runs on cbgo's dispatch-queue thread while
+		// holding the conn read-lock. The reader may have abandoned the
+		// request via ctx.Done — its deferred delChrReader needs the write
+		// lock, so a blocking send here would deadlock the dispatch
+		// thread. The channel is buffered (cap 1, one response per
+		// registered read); a second delivery for the same read (e.g. a
+		// notification racing an in-flight read on a subscribed
+		// characteristic) is dropped for the read channel but still
+		// reaches the subscription handler below.
+		select {
+		case ch <- err:
+		default:
+		}
 		found = true
 	}
 
@@ -220,7 +242,7 @@ func (c *conn) addChrReader(char *ble.Characteristic) (chan error, error) {
 		return nil, fmt.Errorf("cannot read from the same attribute twice: uuid=%s", uuidStr)
 	}
 
-	ch := make(chan error)
+	ch := make(chan error, 1) // buffered: processChrRead must never block
 	c.chrReads[uuidStr] = ch
 
 	return ch, nil
