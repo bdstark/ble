@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, deadlines]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  # The HCI/ATT/GATT stacks are timing- and goroutine-heavy; a single pass
+  # hides leaks and ordering flakes that repetition surfaces (a leaked
+  # conn-disposal goroutine once crashed only under -count=50).
+  repeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Repeated core-package tests
+        run: go test -count=25 -timeout 15m ./linux/att ./linux/gatt ./linux/hci
