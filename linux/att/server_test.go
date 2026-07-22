@@ -27,7 +27,10 @@ func TestServerLoop(t *testing.T) {
 	done := make(chan struct{})
 	go func() { s.Loop(); close(done) }()
 
-	// Spurious confirmation: no indication is pending.
+	// Spurious confirmations: no indication is pending. The first parks in
+	// chConfirm's buffer (indicate() would drain it); the second finds the
+	// buffer full and is discarded by the reader's default branch.
+	f.in <- []byte{HandleValueConfirmationCode}
 	f.in <- []byte{HandleValueConfirmationCode}
 
 	// MTU exchange.

@@ -25,10 +25,20 @@ type Server struct {
 
 	// Refer to [Vol 3, Part F, 3.3.2 & 3.3.3] for the requirement of
 	// sequential request-response protocol, and transactions.
-	rxMTU     int
-	txBuf     []byte
-	chNotBuf  chan []byte
-	chIndBuf  chan []byte
+	rxMTU    int
+	txBuf    []byte
+	chNotBuf chan []byte
+	chIndBuf chan []byte
+
+	// chConfirm carries Handle Value Confirmations from Loop's reader to
+	// the indicate() waiting for one. It is buffered (cap 1) because the
+	// reader's send is non-blocking and would otherwise race indicate():
+	// a confirmation arriving between conn.Write returning and indicate()
+	// reaching its receive found no receiver ready, took the reader's
+	// default branch, and was discarded — the valid indication then timed
+	// out and closed the bearer. With the buffer, at most one confirmation
+	// (the only number a sequential protocol allows outstanding) parks in
+	// the channel until indicate() collects it.
 	chConfirm chan bool
 
 	dummyRspWriter ble.ResponseWriter
@@ -60,7 +70,7 @@ func NewServer(db *DB, l2c ble.Conn) (*Server, error) {
 		txBuf:     make([]byte, ble.DefaultMTU, ble.DefaultMTU),
 		chNotBuf:  make(chan []byte, 1),
 		chIndBuf:  make(chan []byte, 1),
-		chConfirm: make(chan bool),
+		chConfirm: make(chan bool, 1),
 
 		dummyRspWriter: ble.NewResponseWriter(nil),
 	}
@@ -96,6 +106,18 @@ func (s *Server) indicate(h uint16, data []byte) (int, error) {
 	rsp.SetAttributeOpcode()
 	rsp.SetAttributeHandle(h)
 	m := copy(rsp.AttributeValue(), data)
+	// Indications are serialized by the chIndBuf slot and every prior one
+	// consumed its confirmation (or closed the bearer), so anything already
+	// buffered here is a confirmation the peer sent with no indication
+	// outstanding. Drop it now: consumed later it would complete THIS
+	// indication before the peer actually confirmed it.
+	select {
+	case _, ok := <-s.chConfirm:
+		if ok {
+			ble.Logger.Error("server: dropping a spurious confirmation (no indication was outstanding)")
+		}
+	default:
+	}
 	n, err := s.conn.Write(rsp[:3+m])
 	if err != nil {
 		return n, err

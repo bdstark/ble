@@ -572,12 +572,19 @@ func TestServerIndicateWire(t *testing.T) {
 	f := newOnceConn()
 	s := newTestServer(t, f, svc)
 
-	// Confirmed indication.
-	go func() { s.chConfirm <- true }()
+	// Confirmed indication: like a real peer, confirm only after the
+	// indication reached the wire — a confirmation with no indication
+	// outstanding is spurious and indicate() drops it.
+	wrote := make(chan []byte, 1)
+	go func() {
+		w := <-f.writes // the indication PDU
+		wrote <- w
+		s.chConfirm <- true
+	}()
 	if _, err := s.indicate(3, []byte{0x11}); err != nil {
 		t.Fatal(err)
 	}
-	wantBytes(t, recvWrite(t, f.writes), HandleValueIndicationCode, 0x03, 0x00, 0x11)
+	wantBytes(t, <-wrote, HandleValueIndicationCode, 0x03, 0x00, 0x11)
 
 	// Unconfirmed indication times out via the package-level ATT timeout.
 	old := seqProtoTimeout
@@ -620,5 +627,72 @@ func TestIndicationTimeoutClosesBearer(t *testing.T) {
 	}
 	if _, err := s.indicate(3, []byte{0x22}); err == nil {
 		t.Fatal("indicate on a timed-out bearer succeeded (stale confirmation adoptable)")
+	}
+}
+
+// confirmOnWriteConn delivers a Handle Value Confirmation the instant an
+// indication hits the wire, and does not return from Write until the
+// server's reader goroutine has fully processed it — modeling a peer that
+// confirms faster than indicate() can reach its receive.
+type confirmOnWriteConn struct {
+	*onceConn
+}
+
+func (c *confirmOnWriteConn) Write(p []byte) (int, error) {
+	n, err := c.onceConn.Write(p)
+	if err == nil && len(p) > 0 && p[0] == HandleValueIndicationCode {
+		// in is unbuffered: the first send returns once the reader picked
+		// up the confirmation; the second returns only after the reader
+		// finished dispatching it and came back for more. When Write
+		// returns, the confirmation has therefore been fully processed.
+		c.in <- []byte{HandleValueConfirmationCode}
+		c.in <- []byte{ReadMultipleRequestCode} // benign follow-up PDU
+	}
+	return n, err
+}
+
+// TestIndicationFastConfirmationNotLost: a confirmation that lands before
+// indicate() begins receiving must complete the indication, not vanish.
+// (Reverting chConfirm to an unbuffered channel makes this fail: the
+// reader's non-blocking send finds no receiver ready, discards the valid
+// confirmation, and the indication times out — closing a healthy bearer.)
+func TestIndicationFastConfirmationNotLost(t *testing.T) {
+	old := seqProtoTimeout
+	seqProtoTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { seqProtoTimeout = old })
+
+	svc, _ := testService(nil)
+	f := &confirmOnWriteConn{onceConn: newOnceConn()}
+	s := newTestServer(t, f, svc)
+	done := make(chan struct{})
+	go func() { s.Loop(); close(done) }()
+
+	if _, err := s.indicate(3, []byte{0x11}); err != nil {
+		t.Fatalf("indicate with a fast confirmation = %v, want nil", err)
+	}
+
+	f.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server Loop did not exit")
+	}
+}
+
+// TestIndicateDropsPreexistingConfirmation: a confirmation already buffered
+// when indicate() starts (the peer confirmed with nothing outstanding) must
+// not be adopted as the new indication's answer.
+func TestIndicateDropsPreexistingConfirmation(t *testing.T) {
+	old := seqProtoTimeout
+	seqProtoTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { seqProtoTimeout = old })
+
+	svc, _ := testService(nil)
+	f := newOnceConn()
+	s := newTestServer(t, f, svc)
+
+	s.chConfirm <- true // spurious: no indication outstanding
+	if _, err := s.indicate(3, []byte{0x11}); !errors.Is(err, ErrSeqProtoTimeout) {
+		t.Fatalf("indicate with only a spurious confirmation = %v, want ErrSeqProtoTimeout", err)
 	}
 }
