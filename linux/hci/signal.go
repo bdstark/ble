@@ -224,8 +224,31 @@ func (c *Conn) handleConnectionParameterUpdateRequest(s sigCmd) {
 		return
 	}
 
+	// Claim the connection's single update slot. LE Connection Update
+	// Complete carries only the handle — no correlation with the command
+	// that caused it — so a peer-requested update must never be in flight
+	// alongside an application UpdateParams: their completions would be
+	// indistinguishable and the waiter would adopt the wrong result. If the
+	// slot is taken, reject the request; the peer may re-request. [Vol 3,
+	// Part A, 4.21: Result 0x0001 = rejected]
+	c.muUpdate.Lock()
+	busy := c.updateWaiter != nil || c.updateSignalPending
+	if !busy {
+		c.updateSignalPending = true
+	}
+	c.muUpdate.Unlock()
+	if busy {
+		c.sendResponse(
+			SignalConnectionParameterUpdateResponse,
+			s.id(),
+			&ConnectionParameterUpdateResponse{
+				Result: 1, // Reject: an update is already in flight.
+			})
+		return
+	}
+
 	// LE Connection Update (0x08|0x0013) [Vol 2, Part E, 7.8.18]
-	c.hci.Send(&cmd.LEConnectionUpdate{
+	if err := c.hci.Send(&cmd.LEConnectionUpdate{
 		ConnectionHandle:   c.param.ConnectionHandle(),
 		ConnIntervalMin:    req.IntervalMin,
 		ConnIntervalMax:    req.IntervalMax,
@@ -233,12 +256,25 @@ func (c *Conn) handleConnectionParameterUpdateRequest(s sigCmd) {
 		SupervisionTimeout: req.TimeoutMultiplier,
 		MinimumCELength:    0, // Informational, and spec doesn't specify the use.
 		MaximumCELength:    0, // Informational, and spec doesn't specify the use.
-	}, nil)
+	}, nil); err != nil {
+		// The command never took: release the slot (no completion is owed)
+		// and tell the peer instead of ghosting the request.
+		c.muUpdate.Lock()
+		c.updateSignalPending = false
+		c.muUpdate.Unlock()
+		c.sendResponse(
+			SignalConnectionParameterUpdateResponse,
+			s.id(),
+			&ConnectionParameterUpdateResponse{
+				Result: 1, // Reject.
+			})
+		return
+	}
 
-	// Currently, we (as a slave host) accept all the parameters and forward
-	// it to the controller. The controller might update all, partial or even
-	// none (ignore) of the parameters. The slave(remote) host will be indicated
-	// by its controller if the update actually happens.
+	// We accept all the parameters and forward them to the controller. The
+	// controller might update all, partial or even none (ignore) of the
+	// parameters. The remote host will be indicated by its controller if
+	// the update actually happens.
 	// TODO: allow users to implement what parameters to accept.
 	c.sendResponse(
 		SignalConnectionParameterUpdateResponse,

@@ -99,6 +99,13 @@ type Conn struct {
 	// interleaving analysis.
 	muUpdate     sync.Mutex
 	updateWaiter chan leConnUpdate
+	// updateSignalPending records an LE Connection Update fired by the
+	// L2CAP Connection Parameter Update Request handler (signal.go) on the
+	// peer's behalf. The completion event carries only the handle, so the
+	// two update sources must never be in flight together — this flag both
+	// blocks UpdateParams while set and steers the completion away from
+	// any app waiter. Guarded by muUpdate.
+	updateSignalPending bool
 
 	// muDataLen guards dataLen, the last data-length maximums negotiated for
 	// this connection. handleLEDataLengthChange (on sktLoop) writes it; the
@@ -494,9 +501,13 @@ func (c *Conn) ReadRSSI() (int, error) {
 //     from h.conns; both run on sktLoop, so a later meta event's handle
 //     lookup misses and is a no-op. Any meta event that landed first does a
 //     buffered/dropped send to a waiter that has moved on — harmless.
-//  4. No-waiter completion: a slave-forwarded update (signal.go, fire and
-//     forget) or a completion racing teardown finds updateWaiter nil and is a
-//     no-op — it never wedges sktLoop.
+//  4. Peer-requested update (signal.go forwarding a Connection Parameter
+//     Update Request): it shares this connection's single update slot via
+//     updateSignalPending — it is rejected while an app update is in
+//     flight, it blocks UpdateParams (ErrUpdateInProgress) while it is,
+//     and deliverConnUpdate consumes its completion without touching the
+//     app waiter. A completion racing teardown finds neither flag nor
+//     waiter and is a no-op — it never wedges sktLoop.
 //  5. Teardown racing registration: the chDone check under muUpdate below
 //     rejects a registration once teardown started; if chDone closes just
 //     after, the select's teardown arm handles it.
@@ -506,8 +517,9 @@ func (c *Conn) ReadRSSI() (int, error) {
 // after call A times out and call B has since registered would be read by
 // B as its own. This is inherent to the event and shared by every host
 // stack; here it is effectively unreachable — connUpdateTimeout (40s)
-// exceeds the 32s max supervision timeout, and ErrUpdateInProgress permits
-// only one update per link at a time.
+// exceeds the 32s max supervision timeout, the update slot admits one
+// update per link at a time, and the slot covers BOTH producers of the
+// event (app calls here and peer requests via signal.go).
 func (c *Conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
 	imin, imax, latency, timeout, err := p.Encode()
 	if err != nil {
@@ -516,7 +528,7 @@ func (c *Conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
 
 	ch := make(chan leConnUpdate, 1)
 	c.muUpdate.Lock()
-	if c.updateWaiter != nil {
+	if c.updateWaiter != nil || c.updateSignalPending {
 		c.muUpdate.Unlock()
 		return ErrUpdateInProgress
 	}
@@ -570,10 +582,17 @@ func (c *Conn) UpdateParams(ctx context.Context, p ble.ConnParams) error {
 // UpdateParams, if one is registered. It runs on the sktLoop goroutine (via
 // handleLEConnectionUpdateComplete) and must never block it: the send is
 // non-blocking onto a cap-1 channel that is never closed, so a duplicate
-// completion, a completion for a slave-forwarded update with no waiter, or one
-// racing the waiter's own cleanup are all harmless.
+// completion, a completion with no waiter, or one racing the waiter's own
+// cleanup are all harmless. A completion owed to a peer-requested update
+// (updateSignalPending) is consumed by that flag and never reaches an app
+// waiter — the event has no correlation ID, so ownership is tracked here.
 func (c *Conn) deliverConnUpdate(u leConnUpdate) {
 	c.muUpdate.Lock()
+	if c.updateSignalPending {
+		c.updateSignalPending = false
+		c.muUpdate.Unlock()
+		return
+	}
 	ch := c.updateWaiter
 	c.muUpdate.Unlock()
 	if ch == nil {

@@ -481,3 +481,110 @@ func TestUpdateParamsDisconnectRace(t *testing.T) {
 		cancel()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Peer-requested updates share the single per-conn update slot
+// ---------------------------------------------------------------------------
+
+// TestPeerUpdateCompletionSkipsAppWaiter: a completion owed to a
+// peer-requested (signal-path) update must be consumed by the pending flag,
+// never delivered to an app waiter — LE Connection Update Complete has no
+// correlation ID, so ownership is tracked host-side.
+func TestPeerUpdateCompletionSkipsAppWaiter(t *testing.T) {
+	skt := newFakeSkt()
+	h := newConnUpdateHCI(t, skt)
+	c := addConnWithHandle(h, 0x0040)
+
+	ch := make(chan leConnUpdate, 1)
+	c.muUpdate.Lock()
+	c.updateWaiter = ch
+	c.updateSignalPending = true
+	c.muUpdate.Unlock()
+
+	c.deliverConnUpdate(leConnUpdate{status: 0x3B}) // the peer update's completion
+	select {
+	case u := <-ch:
+		t.Fatalf("app waiter received the peer update's completion (status 0x%02X)", u.status)
+	default:
+	}
+	c.muUpdate.Lock()
+	cleared := !c.updateSignalPending
+	c.muUpdate.Unlock()
+	if !cleared {
+		t.Fatal("updateSignalPending not cleared by its completion")
+	}
+
+	// The next completion is the app's own.
+	c.deliverConnUpdate(leConnUpdate{status: 0x00})
+	select {
+	case u := <-ch:
+		if u.status != 0x00 {
+			t.Fatalf("app waiter got status 0x%02X, want 0x00", u.status)
+		}
+	default:
+		t.Fatal("app waiter never received its own completion")
+	}
+}
+
+// TestUpdateParamsBlockedDuringPeerUpdate: while a peer-requested update is
+// in flight, UpdateParams must refuse with ErrUpdateInProgress instead of
+// racing it for the uncorrelated completion.
+func TestUpdateParamsBlockedDuringPeerUpdate(t *testing.T) {
+	skt := newFakeSkt()
+	h := newConnUpdateHCI(t, skt)
+	c := addConnWithHandle(h, 0x0040)
+
+	c.muUpdate.Lock()
+	c.updateSignalPending = true
+	c.muUpdate.Unlock()
+
+	err := c.UpdateParams(context.Background(), ble.ConnParams{
+		IntervalMin: 50 * time.Millisecond, IntervalMax: 50 * time.Millisecond,
+		Timeout: 4 * time.Second,
+	})
+	if !errors.Is(err, ErrUpdateInProgress) {
+		t.Fatalf("UpdateParams during peer update = %v, want ErrUpdateInProgress", err)
+	}
+}
+
+// TestPeerUpdateRejectedWhileAppUpdateInFlight: a Connection Parameter
+// Update Request arriving while an app UpdateParams waits must be rejected
+// (Result 0x0001) without firing a second LE Connection Update command.
+func TestPeerUpdateRejectedWhileAppUpdateInFlight(t *testing.T) {
+	skt := newFakeSkt()
+	h := newConnUpdateHCI(t, skt)
+	c := addConnWithHandle(h, 0x0040)
+
+	c.muUpdate.Lock()
+	c.updateWaiter = make(chan leConnUpdate, 1) // an app update is in flight
+	c.muUpdate.Unlock()
+
+	// CPUP request: code, id, len(8), then IntervalMin/Max, Latency, Timeout.
+	sig := make(sigCmd, 4+8)
+	sig[0] = SignalConnectionParameterUpdateRequest
+	sig[1] = 0x01
+	binary.LittleEndian.PutUint16(sig[2:4], 8)
+	binary.LittleEndian.PutUint16(sig[4:6], 40)   // IntervalMin
+	binary.LittleEndian.PutUint16(sig[6:8], 56)   // IntervalMax
+	binary.LittleEndian.PutUint16(sig[8:10], 0)   // SlaveLatency
+	binary.LittleEndian.PutUint16(sig[10:12], 42) // TimeoutMultiplier
+	c.handleConnectionParameterUpdateRequest(sig)
+
+	wantOp := (&cmd.LEConnectionUpdate{}).OpCode()
+	var rsp []byte
+	for _, w := range skt.written() {
+		if w[0] == pktTypeCommand && int(w[1])|int(w[2])<<8 == wantOp {
+			t.Fatal("a second LE Connection Update command was fired while one was in flight")
+		}
+		if w[0] == pktTypeACLData {
+			rsp = w
+		}
+	}
+	if rsp == nil {
+		t.Fatal("no L2CAP response reached the wire")
+	}
+	// The response's Result field is the packet's final uint16: 1 = rejected.
+	if got := binary.LittleEndian.Uint16(rsp[len(rsp)-2:]); got != 1 {
+		t.Fatalf("Connection Parameter Update Response result = %d, want 1 (rejected)", got)
+	}
+}
