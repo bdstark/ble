@@ -313,7 +313,7 @@ func TestSetDataLengthContextCancelled(t *testing.T) {
 
 // TestDataLengthDefault: before any event the getter reports the BLE defaults.
 func TestDataLengthDefault(t *testing.T) {
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
+	h := &HCI{conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
 	c := addConnWithHandle(h, 0x0040)
 	tx, txt, rx, rxt := c.DataLength()
 	if tx != ble.DataLengthMinTxOctets || txt != ble.DataLengthMinTxTime ||
@@ -362,7 +362,7 @@ func TestDataLengthChangeUnsolicited(t *testing.T) {
 // event racing teardown) is a harmless no-op.
 func TestDataLengthChangeUnknownHandle(t *testing.T) {
 	debugLogger(t) // exercise the debug-gated log path
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}}
+	h := &HCI{conns: map[uint16]*Conn{}}
 
 	payload := dataLengthChangeWirePkt(0x0099, 251, 2120, 251, 2120)[3:] // from the subevent code
 	if err := h.handleLEDataLengthChange(payload); err != nil {
@@ -374,7 +374,7 @@ func TestDataLengthChangeUnknownHandle(t *testing.T) {
 // exercised for a registered conn (and the state still lands).
 func TestDataLengthChangeLoggedForKnownHandle(t *testing.T) {
 	debugLogger(t)
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
+	h := &HCI{conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
 	c := addConnWithHandle(h, 0x0040)
 
 	payload := dataLengthChangeWirePkt(0x0040, 251, 2120, 251, 2120)[3:]

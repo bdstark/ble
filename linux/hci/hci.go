@@ -48,7 +48,6 @@ func NewHCI(opts ...ble.Option) (*HCI, error) {
 		evth: map[int]handlerFn{},
 		subh: map[int]handlerFn{},
 
-		muConns:      &sync.Mutex{},
 		conns:        make(map[uint16]*Conn),
 		chMasterConn: make(chan *Conn),
 		chSlaveConn:  make(chan *Conn),
@@ -138,7 +137,7 @@ type HCI struct {
 	pool *Pool
 
 	// L2CAP connections
-	muConns      *sync.Mutex
+	muConns      sync.Mutex
 	conns        map[uint16]*Conn
 	chMasterConn chan *Conn // Dial returns master connections.
 	chSlaveConn  chan *Conn // Peripheral accept slave connections.

@@ -266,7 +266,7 @@ func TestSktLoopEOF(t *testing.T) {
 
 func TestHandleACLUnknownHandle(t *testing.T) {
 	quietLogger(t)
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}}
+	h := &HCI{conns: map[uint16]*Conn{}}
 	// ACL data for handle 0x0040, which has no connection: warn and drop.
 	if err := h.handleACL([]byte{0x40, 0x00, 0x01, 0x00, 0xAA}); err != nil {
 		t.Fatalf("handleACL = %v, want nil", err)

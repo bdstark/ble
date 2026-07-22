@@ -106,7 +106,6 @@ func leConnCompletePkt(status byte, handle uint16, role byte) []byte {
 // directly, with buffered connection channels so deliveries don't block.
 func newConnHCI() *HCI {
 	return &HCI{
-		muConns:      &sync.Mutex{},
 		conns:        map[uint16]*Conn{},
 		chMasterConn: make(chan *Conn, 1),
 		chSlaveConn:  make(chan *Conn, 1),

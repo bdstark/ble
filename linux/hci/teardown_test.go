@@ -340,9 +340,8 @@ func TestRecombineWedgedReaderTeardown(t *testing.T) {
 func TestTeardownRaces(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		h := &HCI{
-			muConns: &sync.Mutex{},
-			conns:   map[uint16]*Conn{},
-			pool:    NewPool(32, 4),
+			conns: map[uint16]*Conn{},
+			pool:  NewPool(32, 4),
 		}
 		c := addConn(h, 0x0040)
 		c.txBuffer.Get() // let both credit-return paths have work
@@ -379,9 +378,8 @@ func TestTeardownRaces(t *testing.T) {
 // running after the teardown already happened.
 func TestDoubleTeardownPanicFree(t *testing.T) {
 	h := &HCI{
-		muConns: &sync.Mutex{},
-		conns:   map[uint16]*Conn{},
-		pool:    NewPool(32, 4),
+		conns: map[uint16]*Conn{},
+		pool:  NewPool(32, 4),
 	}
 	c := addConn(h, 0x0040)
 

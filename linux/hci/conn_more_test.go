@@ -201,6 +201,15 @@ func TestGetTimeoutSuccess(t *testing.T) {
 func TestNewConnRecombineFailedLog(t *testing.T) {
 	quietLogger(t)
 	h := &HCI{pool: NewPool(64, 2)}
+	// The recombine failure kills the conn, whose disposal goroutine runs
+	// Close: two Send attempts (nil chCmdBufs, so each waits cmdTimeout)
+	// and then the disconnectTimeout wait before force-cleanup. Shrink
+	// those waits and join the goroutine so it cannot outlive this test
+	// and race later tests' writes to the tunable timeout vars.
+	oldCmd, oldDisc := cmdTimeout, disconnectTimeout
+	cmdTimeout, disconnectTimeout = 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { cmdTimeout, disconnectTimeout = oldCmd, oldDisc })
+	t.Cleanup(h.wgConnDisposal.Wait)
 	c := newConn(h, make(evt.LEConnectionComplete, 19))
 
 	// LE-ATT fragment claiming a 100-byte payload: larger than rxMPS (23).

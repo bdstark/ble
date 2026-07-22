@@ -408,7 +408,7 @@ func TestUpdateParamsConcurrent(t *testing.T) {
 // a block.
 func TestConnUpdateCompleteNoWaiter(t *testing.T) {
 	quietLogger(t)
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
+	h := &HCI{conns: map[uint16]*Conn{}, pool: NewPool(32, 4)}
 	addConnWithHandle(h, 0x0040)
 
 	payload := connUpdateCompleteWirePkt(0x0040, 0x00, 24, 0, 400)[3:] // from the subevent code
@@ -421,7 +421,7 @@ func TestConnUpdateCompleteNoWaiter(t *testing.T) {
 // (a completion racing teardown) is a harmless no-op.
 func TestConnUpdateCompleteUnknownHandle(t *testing.T) {
 	debugLogger(t) // exercise the debug-gated log path
-	h := &HCI{muConns: &sync.Mutex{}, conns: map[uint16]*Conn{}}
+	h := &HCI{conns: map[uint16]*Conn{}}
 
 	payload := connUpdateCompleteWirePkt(0x0099, 0x00, 24, 0, 400)[3:]
 	if err := h.handleLEConnectionUpdateComplete(payload); err != nil {
