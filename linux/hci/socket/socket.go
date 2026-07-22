@@ -122,17 +122,43 @@ func open(fd, id int) (*Socket, error) {
 	return &Socket{fd: fd, closed: make(chan struct{})}, nil
 }
 
+// readPollMs bounds how long a blocked Read goes between checks of the
+// closed flag. It is the worst-case latency Close adds waiting for the
+// reader to surface, and the idle-socket wakeup period. A variable so the
+// socket tests exercise the bound without waiting wall-clock time.
+var readPollMs = 500
+
 func (s *Socket) Read(p []byte) (int, error) {
 	s.rmu.Lock()
+	// Wait for readability in bounded slices instead of parking in a bare
+	// read(2): the reader re-checks the closed flag between polls, so
+	// Close never depends on the controller producing traffic to get the
+	// reader out of the syscall. (The old implementation woke the reader
+	// by sending a no-op HCI command and waiting for its reply — a Close
+	// whose liveness hinged on the very controller that had just wedged.)
+	pfds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
+	for {
+		select {
+		case <-s.closed:
+			s.rmu.Unlock()
+			return 0, io.EOF
+		default:
+		}
+		pfds[0].Revents = 0
+		n, err := unix.Poll(pfds, readPollMs)
+		if err == unix.EINTR || (err == nil && n == 0) {
+			continue // interrupted or timed out: re-check closed, poll again
+		}
+		if err != nil {
+			s.rmu.Unlock()
+			return 0, fmt.Errorf("can't poll hci socket: %w", err)
+		}
+		break // readable (or POLLERR/POLLHUP: the read below surfaces it)
+	}
 	n, err := unix.Read(s.fd, p)
 	s.rmu.Unlock()
-	// Close always sends a dummy command to wake up Read
-	// bad things happen to the HCI state machines if they receive
-	// a reply from that command, so make sure no data is returned
-	// on a closed socket.
-	//
-	// note that if Write and Close are called concurrently it's
-	// indeterminate which replies get through.
+	// A packet that races Close still must not be delivered: the HCI state
+	// machines above assume nothing arrives after teardown began.
 	select {
 	case <-s.closed:
 		return 0, io.EOF
@@ -162,7 +188,12 @@ func (s *Socket) Write(p []byte) (int, error) {
 func (s *Socket) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
-		s.Write([]byte{0x01, 0x09, 0x10, 0x00}) // no-op command to wake up the Read call if it's blocked
+		// rmu comes free within one poll cycle: Read re-checks the closed
+		// flag between bounded polls, and a read(2) it already entered has
+		// data (or an error) waiting and returns promptly. No wake-up
+		// command, no dependence on a live controller. Taking rmu before
+		// closing the fd keeps the close ordered after any in-flight
+		// syscall on it (no fd-reuse race).
 		s.rmu.Lock()
 		defer s.rmu.Unlock()
 		if err := unix.Close(s.fd); err != nil {
