@@ -20,8 +20,8 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **90.6%** (1320/1457) |
-| Added lines excluding `darwin/` | **99.5%** (1306/1312) |
+| All added lines | **91.4%** (1456/1593) |
+| Added lines excluding `darwin/` | **99.6%** (1442/1448) |
 
 Every changed file is at 100% of its added lines except the ones below.
 The linux backend is pure Go above the socket layer, so all of it —
@@ -55,7 +55,7 @@ the remaining new code sits at 99.5%.
   the HCI's unexported master-conn channel; hardware only.
 
 **`linux/hci/hci.go` — 1 line.**
-- `180` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
+- `193` (`Init` starting the adv dispatcher): `Init` opens the HCI socket
   first and cannot get past that without a device; `advDispatcher` itself
   is fully covered by direct tests. (The former exclusion for `send`'s
   `h.err` done-arm is gone: with `h.err` behind `muErr` the arm is
@@ -63,7 +63,7 @@ the remaining new code sits at 99.5%.
   conn.go is gone too: the `(int, error)` rework landed with tests.)
 
 **`linux/hci/gap.go` — 1 line.**
-- `92` (`sr.Append(adv.ShortName(name))` arm): structurally dead upstream
+- `91` (`sr.Append(adv.ShortName(name))` arm): structurally dead upstream
   code — ShortName appends the full string under the identical length
   check the preceding CompleteName case just failed, so the arm can never
   match. Entered the diff via a rename only; making it reachable would

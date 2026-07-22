@@ -607,3 +607,26 @@ func TestInitRejectsUnusableBufferGeometry(t *testing.T) {
 		t.Fatalf("init() = %v, want a buffer-geometry error", err)
 	}
 }
+
+// TestInitFailsOnEachCommand: every init command's failure must fail init —
+// none may fall through to zero-valued controller state.
+func TestInitFailsOnEachCommand(t *testing.T) {
+	old := cmdTimeout
+	cmdTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { cmdTimeout = old })
+
+	silenced := []Command{
+		&cmd.Reset{}, &cmd.ReadBDADDR{}, &cmd.ReadBufferSize{},
+		&cmd.LEReadBufferSize{}, &cmd.LEReadAdvertisingChannelTxPower{},
+		&cmd.LESetEventMask{}, &cmd.SetEventMask{}, &cmd.WriteLEHostSupport{},
+	}
+	for _, sc := range silenced {
+		skt := newFakeSkt()
+		respondInitRPs(skt, 0x02, sc.OpCode())
+		h := newLoopedHCIOn(t, skt, nil)
+		h.setAllowedCommands(16)
+		if err := h.init(); !errors.Is(err, ErrCommandTimeout) {
+			t.Errorf("init with opcode 0x%04X silenced = %v, want wrapped ErrCommandTimeout", sc.OpCode(), err)
+		}
+	}
+}

@@ -545,3 +545,40 @@ func TestNameCachesNoNameOutcome(t *testing.T) {
 		t.Fatalf("peer without a name was asked %d times, want 1 (cached)", got)
 	}
 }
+
+// TestNameTransientErrorRetries: a non-deterministic failure (ATT error
+// other than attribute-not-found) is NOT cached — the next call retries.
+func TestNameTransientErrorRetries(t *testing.T) {
+	var reads atomic.Int64
+	cln := newRespondingClient(t, func(req []byte) []byte {
+		if req[0] == att.ReadByTypeRequestCode && rbtUUID16(req) == 0x2A00 {
+			reads.Add(1)
+			return attErr(req[0], rbtStart(req), ble.ErrReadNotPerm)
+		}
+		return nil
+	})
+	for i := 0; i < 2; i++ {
+		if got := cln.Name(); got != "" {
+			t.Fatalf("Name() = %q, want \"\"", got)
+		}
+	}
+	if got := reads.Load(); got != 2 {
+		t.Fatalf("transient failure retried %d times, want 2 (uncached)", got)
+	}
+}
+
+// TestUnsubscribeWithoutSubscription is a no-op: nothing to disable at the
+// peer, no wire write.
+func TestUnsubscribeWithoutSubscription(t *testing.T) {
+	cln, srv := newTestClient(t)
+	c := &ble.Characteristic{
+		ValueHandle: 3,
+		CCCD:        &ble.Descriptor{UUID: ble.ClientCharacteristicConfigUUID, Handle: 4},
+	}
+	if err := cln.Unsubscribe(testCtx(t), c, false); err != nil {
+		t.Fatalf("Unsubscribe without subscription = %v, want nil", err)
+	}
+	if n := len(srv.writes()); n != 0 {
+		t.Fatalf("Unsubscribe without subscription wrote %d requests, want 0", n)
+	}
+}

@@ -588,3 +588,97 @@ func TestPeerUpdateRejectedWhileAppUpdateInFlight(t *testing.T) {
 		t.Fatalf("Connection Parameter Update Response result = %d, want 1 (rejected)", got)
 	}
 }
+
+// TestPeerUpdateAcceptedWhenSlotFree: with no app update in flight, the
+// peer's request is forwarded (one LE Connection Update command), answered
+// with Result 0, the slot is held until the completion arrives, and the
+// completion is consumed without touching any later app waiter.
+func TestPeerUpdateAcceptedWhenSlotFree(t *testing.T) {
+	skt := newFakeSkt()
+	respondWithStatus(skt, 0x00)
+	h := newConnUpdateHCI(t, skt)
+	c := addConnWithHandle(h, 0x0040)
+
+	sig := make(sigCmd, 4+8)
+	sig[0] = SignalConnectionParameterUpdateRequest
+	sig[1] = 0x01
+	binary.LittleEndian.PutUint16(sig[2:4], 8)
+	binary.LittleEndian.PutUint16(sig[4:6], 40)
+	binary.LittleEndian.PutUint16(sig[6:8], 56)
+	binary.LittleEndian.PutUint16(sig[8:10], 0)
+	binary.LittleEndian.PutUint16(sig[10:12], 42)
+	c.handleConnectionParameterUpdateRequest(sig)
+
+	wantOp := (&cmd.LEConnectionUpdate{}).OpCode()
+	cmds, rsps := 0, [][]byte{}
+	for _, w := range skt.written() {
+		if w[0] == pktTypeCommand && int(w[1])|int(w[2])<<8 == wantOp {
+			cmds++
+		}
+		if w[0] == pktTypeACLData {
+			rsps = append(rsps, w)
+		}
+	}
+	if cmds != 1 || len(rsps) != 1 {
+		t.Fatalf("accept path wrote %d update commands and %d responses, want 1 and 1", cmds, len(rsps))
+	}
+	if got := binary.LittleEndian.Uint16(rsps[0][len(rsps[0])-2:]); got != 0 {
+		t.Fatalf("response result = %d, want 0 (accepted)", got)
+	}
+	c.muUpdate.Lock()
+	pending := c.updateSignalPending
+	c.muUpdate.Unlock()
+	if !pending {
+		t.Fatal("update slot not held while the peer update awaits completion")
+	}
+	c.deliverConnUpdate(leConnUpdate{status: 0x00})
+	c.muUpdate.Lock()
+	pending = c.updateSignalPending
+	c.muUpdate.Unlock()
+	if pending {
+		t.Fatal("update slot not released by the peer update's completion")
+	}
+}
+
+// TestPeerUpdateSendFailureReleasesSlot: when forwarding the update to the
+// controller fails, the slot is released (no completion is owed) and the
+// peer gets a rejection instead of silence.
+func TestPeerUpdateSendFailureReleasesSlot(t *testing.T) {
+	quietLogger(t)
+	oldCmd := cmdTimeout
+	cmdTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { cmdTimeout = oldCmd })
+
+	skt := newFakeSkt() // never answers: the forward times out
+	h := newConnUpdateHCI(t, skt)
+	c := addConnWithHandle(h, 0x0040)
+
+	sig := make(sigCmd, 4+8)
+	sig[0] = SignalConnectionParameterUpdateRequest
+	sig[1] = 0x01
+	binary.LittleEndian.PutUint16(sig[2:4], 8)
+	binary.LittleEndian.PutUint16(sig[4:6], 40)
+	binary.LittleEndian.PutUint16(sig[6:8], 56)
+	binary.LittleEndian.PutUint16(sig[8:10], 0)
+	binary.LittleEndian.PutUint16(sig[10:12], 42)
+	c.handleConnectionParameterUpdateRequest(sig)
+
+	c.muUpdate.Lock()
+	pending := c.updateSignalPending
+	c.muUpdate.Unlock()
+	if pending {
+		t.Fatal("update slot still held after the forward failed")
+	}
+	var rsp []byte
+	for _, w := range skt.written() {
+		if w[0] == pktTypeACLData {
+			rsp = w
+		}
+	}
+	if rsp == nil {
+		t.Fatal("no rejection reached the peer after the forward failed")
+	}
+	if got := binary.LittleEndian.Uint16(rsp[len(rsp)-2:]); got != 1 {
+		t.Fatalf("response result = %d, want 1 (rejected)", got)
+	}
+}
