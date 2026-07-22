@@ -1,3 +1,5 @@
+//go:build darwin
+
 // pmgrdlg.go: Implements the PeripheralManagerDelegate interface.
 // CoreBluetooth communicates events asynchronously via callbacks.  This file
 // implements a synchronous interface by translating these callbacks into

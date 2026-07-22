@@ -1,3 +1,5 @@
+//go:build darwin
+
 // cmgrdlg.go: Implements the CentralManagerDelegate interface.  CoreBluetooth
 // communicates events asynchronously via callbacks.  This file implements a
 // synchronous interface by translating these callbacks into channel
