@@ -39,12 +39,21 @@ type Client struct {
 	sync.RWMutex
 
 	profile *ble.Profile
-	name    string
-	// nameRead marks the GAP Device Name as resolved — including the
-	// deterministic negative outcomes (peer exposes none, malformed
-	// response) — so Name() never re-runs its round trips per call. A
-	// peer without the attribute used to cost two ATT exchanges under the
-	// client-wide lock on EVERY Name() call (e.g. from a logging path).
+
+	// nameMu guards name/nameRead and serializes Name resolution. It is
+	// deliberately NOT the client-wide embedded lock: Name reads the GAP
+	// Device Name over up to two ATT round trips, and holding the embedded
+	// lock across them stalled every other client method — Addr, Profile,
+	// reads, writes — for up to the ATT transaction timeout (30s) per trip
+	// whenever the peer was slow. With its own mutex, Name blocks only
+	// other Name calls (which is the point: concurrent callers dedupe onto
+	// the single resolution instead of each issuing the reads), and the ATT
+	// layer serializes the reads against other traffic on its own.
+	// nameRead caches the resolved outcome — including deterministic
+	// negatives (peer exposes none, malformed response) — so at most one
+	// call ever pays the round trips.
+	nameMu   sync.Mutex
+	name     string
 	nameRead bool
 
 	// subsMu guards subs and each sub's handler fields for HandleNotification,
@@ -81,9 +90,12 @@ func (p *Client) Addr() ble.Addr {
 // Read By Type request, so the caller need not have discovered service
 // 0x1800 first; each round trip is bounded by the ATT bearer's own
 // transaction timeout.
+//
+// Name holds only nameMu (not the client-wide lock), so a slow peer during
+// the read never blocks other operations on this client.
 func (p *Client) Name() string {
-	p.Lock()
-	defer p.Unlock()
+	p.nameMu.Lock()
+	defer p.nameMu.Unlock()
 	if p.nameRead {
 		return p.name
 	}

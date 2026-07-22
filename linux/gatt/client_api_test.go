@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -394,6 +395,51 @@ func TestNameErrorNotCached(t *testing.T) {
 	r.failRead.Store(false)
 	if got := cln.Name(); got != "dev" {
 		t.Fatalf("Name() after the peer recovered = %q, want \"dev\"", got)
+	}
+}
+
+// TestNameDoesNotBlockOtherOps: while Name() is parked on a slow peer, the
+// rest of the client stays responsive. Name holds only nameMu, not the
+// client-wide lock, so an Addr() (which takes the client RLock) returns
+// immediately. Under the old code — Name held the exclusive client lock
+// across its round trips — this Addr() blocked until the peer answered.
+func TestNameDoesNotBlockOtherOps(t *testing.T) {
+	reachedRead := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	cln := newRespondingClient(t, func(req []byte) []byte {
+		switch req[0] {
+		case att.ReadByTypeRequestCode:
+			if rbtUUID16(req) != 0x2A00 {
+				return errAttrNotFound(req[0])
+			}
+			return []byte{att.ReadByTypeResponseCode, 5, 0x03, 0x00, 'x', 'x', 'x'}
+		case att.ReadRequestCode:
+			// Block the follow-up value read, emulating a slow peer.
+			once.Do(func() { close(reachedRead) })
+			<-release
+			return append([]byte{att.ReadResponseCode}, "slowdev"...)
+		}
+		return nil
+	})
+	t.Cleanup(func() { close(release) })
+
+	nameResult := make(chan string, 1)
+	go func() { nameResult <- cln.Name() }()
+
+	<-reachedRead // Name() is now parked inside the value read
+
+	addrDone := make(chan struct{})
+	go func() { _ = cln.Addr(); close(addrDone) }()
+	select {
+	case <-addrDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Addr() blocked while Name() was mid-read; Name still holds the client-wide lock")
+	}
+
+	release <- struct{}{} // let Name() finish
+	if got := <-nameResult; got != "slowdev" {
+		t.Fatalf("Name() = %q, want \"slowdev\"", got)
 	}
 }
 
