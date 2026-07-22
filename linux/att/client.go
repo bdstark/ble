@@ -606,6 +606,12 @@ func (c *Client) resolveAbandoned(ctx context.Context) error {
 				return fmt.Errorf("unexpected ATT response received: %w", err)
 			}
 		case err := <-c.chErr:
+			// Loop has exited: no response — and no second error — will
+			// ever arrive, so the abandoned transaction can never resolve.
+			// Poison the bearer so later requests fail fast with
+			// ErrBearerClosed instead of re-entering this wait and parking
+			// until the abandoned transaction's deadline.
+			c.bearerClosed.Store(true)
 			return fmt.Errorf("ATT request failed: %w", err)
 		case <-ctx.Done():
 			return ctx.Err()

@@ -363,7 +363,10 @@ func TestAbandonedResolveRefusalWriteError(t *testing.T) {
 }
 
 // TestAbandonedResolveTransportError: the transport dying while a request
-// waits out an abandoned transaction surfaces as an error, not a hang.
+// waits out an abandoned transaction surfaces as an error, not a hang — and
+// poisons the bearer: Loop has exited and chErr delivered its only error,
+// so without the poison a THIRD request would re-enter resolveAbandoned and
+// park until the abandoned transaction's 30s deadline.
 func TestAbandonedResolveTransportError(t *testing.T) {
 	f := &closeRecordConn{onceConn: newOnceConn()}
 	c := startClient(t, f)
@@ -373,5 +376,15 @@ func TestAbandonedResolveTransportError(t *testing.T) {
 	f.Close() // Loop's Read returns EOF, which lands in chErr
 	if _, err := c.Read(context.Background(), 2); !errors.Is(err, io.EOF) {
 		t.Fatalf("request over a dead transport = %v, want io.EOF", err)
+	}
+
+	// The follow-up request fails fast — no 30s wait on a transaction that
+	// can never resolve, and nothing written to the dead bearer.
+	start := time.Now()
+	if _, err := c.Read(context.Background(), 3); !errors.Is(err, ErrBearerClosed) {
+		t.Fatalf("request after transport death = %v, want ErrBearerClosed", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("request after transport death took %v, want fail-fast", elapsed)
 	}
 }
