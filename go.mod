@@ -1,10 +1,10 @@
 module github.com/bdstark/ble
 
-go 1.21
+go 1.26
 
 require (
 	github.com/JuulLabs-OSS/cbgo v0.0.1
-	golang.org/x/sys v0.30.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
