@@ -501,18 +501,23 @@ func TestHandlerErrorDoesNotPoisonSend(t *testing.T) {
 	}
 }
 
-// TestInitReturnsRecordedError: init reports the HCI's recorded fatal error
-// (and nil when the command exchanges completed).
+// TestInitReturnsRecordedError: init succeeds when every command exchange
+// completes with full-length return parameters and a sane buffer geometry.
+// (Now that init propagates per-command errors, the replies must actually
+// satisfy each RP's Unmarshal — status-only replies no longer pass.)
 func TestInitReturnsRecordedError(t *testing.T) {
 	quietLogger(t)
 	skt := newFakeSkt()
-	respondWithStatus(skt, 0x00)
+	respondInitRPs(skt, 0x02)
 	h := newLoopedHCI(t, skt)
 	if err := h.init(); err != nil {
 		t.Fatalf("init = %v, want nil", err)
 	}
 	if len(skt.written()) == 0 {
 		t.Fatal("init wrote no commands")
+	}
+	if h.bufCnt != 2 || h.bufSize != 0x0202 {
+		t.Fatalf("decoded buffer geometry = %d x %d, want 2 x 0x0202", h.bufCnt, h.bufSize)
 	}
 }
 
@@ -531,5 +536,69 @@ func TestHandleCommandStatusUnknownOpcode(t *testing.T) {
 	h := &HCI{muSent: &sync.Mutex{}, sent: map[int]*pkt{}, chCmdBufs: make(chan []byte, 16)}
 	if err := h.handleCommandStatus(cmdStatusPkt(0x200D, 0x08)[3:]); err == nil {
 		t.Fatal("unknown-opcode status returned nil, want error")
+	}
+}
+
+// respondInitRPs answers every command written to skt with a success
+// CommandComplete whose return parameters are a 0x00 status followed by 32
+// fill bytes — long enough for every init RP's Unmarshal (short status-only
+// replies only ever "worked" while init swallowed Unmarshal errors). With a
+// nonzero fill the decoded buffer geometry is plausible; with 0x00 it is
+// the all-zero geometry of a broken controller. Opcodes in silent get no
+// reply at all.
+func respondInitRPs(skt *fakeSkt, fill byte, silent ...int) {
+	skt.onWrite = func(w []byte) {
+		if len(w) < 3 || w[0] != pktTypeCommand {
+			return
+		}
+		op := int(w[1]) | int(w[2])<<8
+		for _, s := range silent {
+			if op == s {
+				return
+			}
+		}
+		rp := make([]byte, 33)
+		for i := 1; i < len(rp); i++ {
+			rp[i] = fill
+		}
+		pkt := []byte{pktTypeEvent, evt.CommandCompleteCode, byte(3 + len(rp)), 1, byte(op), byte(op >> 8)}
+		skt.rd <- append(pkt, rp...)
+	}
+}
+
+// TestInitFailsOnCommandTimeout: a completion timeout on one init command
+// (here ReadBufferSize, whose reply sizes the TX buffer pool) must fail
+// init with a wrapped ErrCommandTimeout. Previously the error was
+// swallowed, init returned nil with bufCnt still 0, and Init panicked
+// constructing NewPool(sz, -1).
+func TestInitFailsOnCommandTimeout(t *testing.T) {
+	old := cmdTimeout
+	cmdTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { cmdTimeout = old })
+
+	skt := newFakeSkt()
+	respondInitRPs(skt, 0x02, (&cmd.ReadBufferSize{}).OpCode())
+	h := newLoopedHCIOn(t, skt, nil)
+
+	err := h.init()
+	if !errors.Is(err, ErrCommandTimeout) {
+		t.Fatalf("init() = %v, want a wrapped ErrCommandTimeout", err)
+	}
+	if h.bufCnt != 0 {
+		t.Fatalf("bufCnt = %d after failed init, want 0 (never trusted)", h.bufCnt)
+	}
+}
+
+// TestInitRejectsUnusableBufferGeometry: a controller that answers all
+// init commands but reports zero ACL buffers must fail init instead of
+// letting Init build a poolless HCI.
+func TestInitRejectsUnusableBufferGeometry(t *testing.T) {
+	skt := newFakeSkt()
+	respondInitRPs(skt, 0x00) // all-zero RPs: 0 buffers of 0 bytes
+	h := newLoopedHCIOn(t, skt, nil)
+
+	err := h.init()
+	if err == nil || !strings.Contains(err.Error(), "buffer geometry") {
+		t.Fatalf("init() = %v, want a buffer-geometry error", err)
 	}
 }

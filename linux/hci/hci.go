@@ -234,23 +234,38 @@ func (h *HCI) Option(opts ...ble.Option) error {
 }
 
 func (h *HCI) init() error {
-	h.Send(&cmd.Reset{}, nil)
+	// Every command here establishes prerequisite state for a usable HCI,
+	// so each failure — including a completion timeout, which is
+	// survivable elsewhere because callers retry — must fail Init instead
+	// of silently leaving zero-valued controller parameters behind.
+	// bufCnt in particular feeds NewPool(sz, bufCnt-1) in Init: with the
+	// error swallowed, a timed-out ReadBufferSize left bufCnt at 0 and
+	// Init panicked on a negative channel capacity.
+	if err := h.Send(&cmd.Reset{}, nil); err != nil {
+		return fmt.Errorf("hci init: reset: %w", err)
+	}
 
 	ReadBDADDRRP := cmd.ReadBDADDRRP{}
-	h.Send(&cmd.ReadBDADDR{}, &ReadBDADDRRP)
+	if err := h.Send(&cmd.ReadBDADDR{}, &ReadBDADDRRP); err != nil {
+		return fmt.Errorf("hci init: read BD_ADDR: %w", err)
+	}
 
 	a := ReadBDADDRRP.BDADDR
 	h.addr = net.HardwareAddr([]byte{a[5], a[4], a[3], a[2], a[1], a[0]})
 
 	ReadBufferSizeRP := cmd.ReadBufferSizeRP{}
-	h.Send(&cmd.ReadBufferSize{}, &ReadBufferSizeRP)
+	if err := h.Send(&cmd.ReadBufferSize{}, &ReadBufferSizeRP); err != nil {
+		return fmt.Errorf("hci init: read buffer size: %w", err)
+	}
 
 	// Assume the buffers are shared between ACL-U and LE-U.
 	h.bufCnt = int(ReadBufferSizeRP.HCTotalNumACLDataPackets)
 	h.bufSize = int(ReadBufferSizeRP.HCACLDataPacketLength)
 
 	LEReadBufferSizeRP := cmd.LEReadBufferSizeRP{}
-	h.Send(&cmd.LEReadBufferSize{}, &LEReadBufferSizeRP)
+	if err := h.Send(&cmd.LEReadBufferSize{}, &LEReadBufferSizeRP); err != nil {
+		return fmt.Errorf("hci init: LE read buffer size: %w", err)
+	}
 
 	if LEReadBufferSizeRP.HCTotalNumLEDataPackets != 0 {
 		// Okay, LE-U do have their own buffers.
@@ -259,18 +274,34 @@ func (h *HCI) init() error {
 	}
 
 	LEReadAdvertisingChannelTxPowerRP := cmd.LEReadAdvertisingChannelTxPowerRP{}
-	h.Send(&cmd.LEReadAdvertisingChannelTxPower{}, &LEReadAdvertisingChannelTxPowerRP)
+	if err := h.Send(&cmd.LEReadAdvertisingChannelTxPower{}, &LEReadAdvertisingChannelTxPowerRP); err != nil {
+		return fmt.Errorf("hci init: LE read advertising tx power: %w", err)
+	}
 
 	h.txPwrLv = int(LEReadAdvertisingChannelTxPowerRP.TransmitPowerLevel)
 
 	LESetEventMaskRP := cmd.LESetEventMaskRP{}
-	h.Send(&cmd.LESetEventMask{LEEventMask: 0x000000000000001F}, &LESetEventMaskRP)
+	if err := h.Send(&cmd.LESetEventMask{LEEventMask: 0x000000000000001F}, &LESetEventMaskRP); err != nil {
+		return fmt.Errorf("hci init: LE set event mask: %w", err)
+	}
 
 	SetEventMaskRP := cmd.SetEventMaskRP{}
-	h.Send(&cmd.SetEventMask{EventMask: 0x3dbff807fffbffff}, &SetEventMaskRP)
+	if err := h.Send(&cmd.SetEventMask{EventMask: 0x3dbff807fffbffff}, &SetEventMaskRP); err != nil {
+		return fmt.Errorf("hci init: set event mask: %w", err)
+	}
 
 	WriteLEHostSupportRP := cmd.WriteLEHostSupportRP{}
-	h.Send(&cmd.WriteLEHostSupport{LESupportedHost: 1, SimultaneousLEHost: 0}, &WriteLEHostSupportRP)
+	if err := h.Send(&cmd.WriteLEHostSupport{LESupportedHost: 1, SimultaneousLEHost: 0}, &WriteLEHostSupportRP); err != nil {
+		return fmt.Errorf("hci init: write LE host support: %w", err)
+	}
+
+	// A controller that answered everything but reported no usable ACL
+	// buffer geometry still cannot carry traffic — Init sizes the TX pool
+	// as NewPool(..., bufCnt-1), so bufCnt must leave at least one credit
+	// (bufCnt of 0 panicked the pool construction on a negative capacity).
+	if h.bufCnt < 2 || h.bufSize < 1 {
+		return fmt.Errorf("hci init: controller reported unusable ACL buffer geometry (%d buffers x %d bytes)", h.bufCnt, h.bufSize)
+	}
 
 	return h.Error()
 }
