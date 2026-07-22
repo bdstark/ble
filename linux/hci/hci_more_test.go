@@ -278,11 +278,12 @@ func TestHandleACLUnknownHandle(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func newAdvHCI(chCap int) *HCI {
-	return &HCI{
-		advHandler: func(ble.Advertisement) {},
-		adHist:     make([]*Advertisement, 8),
-		chAdv:      make(chan *Advertisement, chCap),
+	h := &HCI{
+		adHist: make([]*Advertisement, 8),
+		chAdv:  make(chan advDelivery, chCap),
 	}
+	h.advTgt.Store(&advTarget{fn: func(ble.Advertisement) {}})
+	return h
 }
 
 // TestAdvReportScanRspPairing: an ADV_IND followed by a SCAN_RSP from the
@@ -296,7 +297,7 @@ func TestAdvReportScanRspPairing(t *testing.T) {
 	if err := h.handleLEAdvertisingReport(advReportPkt(evtTypAdvInd, 0x01, adData)); err != nil {
 		t.Fatalf("AD report: %v", err)
 	}
-	ad := <-h.chAdv
+	ad := (<-h.chAdv).a
 	if ad.ScanResponse() != nil {
 		t.Fatal("AD-only advertisement has a scan response")
 	}
@@ -304,7 +305,7 @@ func TestAdvReportScanRspPairing(t *testing.T) {
 	if err := h.handleLEAdvertisingReport(advReportPkt(evtTypScanRsp, 0x01, srData)); err != nil {
 		t.Fatalf("SR report: %v", err)
 	}
-	paired := <-h.chAdv
+	paired := (<-h.chAdv).a
 	if paired == h.adHist[0] {
 		t.Fatal("scan response mutated the stored history entry instead of a fresh Advertisement")
 	}
@@ -355,10 +356,11 @@ func TestAdvReportNilHandler(t *testing.T) {
 func TestAdvDispatcher(t *testing.T) {
 	got := make(chan ble.Advertisement, 4)
 	h := &HCI{
-		chAdv: make(chan *Advertisement, 4),
+		chAdv: make(chan advDelivery, 4),
 		done:  make(chan bool),
 	}
-	h.advHandler = func(a ble.Advertisement) { got <- a }
+	tgt := &advTarget{fn: func(a ble.Advertisement) { got <- a }}
+	h.advTgt.Store(tgt)
 
 	exited := make(chan struct{})
 	go func() {
@@ -367,7 +369,7 @@ func TestAdvDispatcher(t *testing.T) {
 	}()
 
 	want := &Advertisement{}
-	h.chAdv <- want
+	h.chAdv <- advDelivery{a: want, t: tgt}
 	select {
 	case a := <-got:
 		if a != want {
@@ -383,4 +385,110 @@ func TestAdvDispatcher(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("advDispatcher did not exit after done closed")
 	}
+}
+
+// TestAdvQueuedReportsDroppedOnHandlerChange: reports queued while one
+// handler was registered must never be delivered to the handler that
+// replaced it — a queue drained after a new Scan started would otherwise
+// feed the new scan's handler another scan's advertisements.
+func TestAdvQueuedReportsDroppedOnHandlerChange(t *testing.T) {
+	h := &HCI{
+		chAdv: make(chan advDelivery, 4),
+		done:  make(chan bool),
+	}
+	oldGot := make(chan ble.Advertisement, 4)
+	oldTgt := &advTarget{fn: func(a ble.Advertisement) { oldGot <- a }}
+	h.advTgt.Store(oldTgt)
+	stale := &Advertisement{}
+	h.chAdv <- advDelivery{a: stale, t: oldTgt}
+
+	// A new scan registers its handler before the dispatcher drains the
+	// queue.
+	newGot := make(chan ble.Advertisement, 4)
+	if err := h.SetAdvHandler(func(a ble.Advertisement) { newGot <- a }); err != nil {
+		t.Fatalf("SetAdvHandler: %v", err)
+	}
+
+	exited := make(chan struct{})
+	go func() {
+		h.advDispatcher()
+		close(exited)
+	}()
+
+	// The dispatcher processes the stale entry first (FIFO), then this one:
+	// once the fresh report arrives, the stale entry's fate is decided.
+	fresh := &Advertisement{}
+	h.chAdv <- advDelivery{a: fresh, t: h.advTgt.Load()}
+	select {
+	case a := <-newGot:
+		if a != fresh {
+			t.Fatalf("new handler got %p, want only the fresh report %p", a, fresh)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fresh report was not delivered")
+	}
+	select {
+	case a := <-oldGot:
+		t.Fatalf("replaced handler received %p after a new handler was set", a)
+	default:
+	}
+
+	close(h.done)
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("advDispatcher did not exit after done closed")
+	}
+}
+
+// TestSetAdvHandlerNilStopsDelivery: a nil handler unregisters delivery —
+// subsequent reports are ignored without touching the queue.
+func TestSetAdvHandlerNilStopsDelivery(t *testing.T) {
+	h := newAdvHCI(4)
+	if err := h.SetAdvHandler(nil); err != nil {
+		t.Fatalf("SetAdvHandler(nil): %v", err)
+	}
+	if err := h.handleLEAdvertisingReport(advReportPkt(evtTypAdvNonconnInd, 0x01, nil)); err != nil {
+		t.Fatalf("handleLEAdvertisingReport = %v, want nil", err)
+	}
+	if n := len(h.chAdv); n != 0 {
+		t.Fatalf("report queued with no handler registered: %d entries", n)
+	}
+}
+
+// TestSetAdvHandlerConcurrentWithReports: SetAdvHandler races sktLoop's
+// report handling and the dispatcher by design (a Scan can start while the
+// controller still streams the previous scan's reports). Run them together
+// so the race detector proves the handler hand-off is synchronized.
+func TestSetAdvHandlerConcurrentWithReports(t *testing.T) {
+	h := &HCI{
+		adHist: make([]*Advertisement, 8),
+		chAdv:  make(chan advDelivery, 64),
+		done:   make(chan bool),
+	}
+	h.advTgt.Store(&advTarget{fn: func(ble.Advertisement) {}})
+	go h.advDispatcher()
+	defer close(h.done)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = h.SetAdvHandler(func(ble.Advertisement) {})
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := h.handleLEAdvertisingReport(advReportPkt(evtTypAdvNonconnInd, byte(i%250+1), nil)); err != nil {
+			t.Fatalf("report %d: %v", i, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

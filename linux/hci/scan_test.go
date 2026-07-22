@@ -55,8 +55,8 @@ func multiAdvReportPkt(reports ...advTestReport) []byte {
 func recvAdv(t *testing.T, h *HCI) *Advertisement {
 	t.Helper()
 	select {
-	case a := <-h.chAdv:
-		return a
+	case d := <-h.chAdv:
+		return d.a
 	default:
 		t.Fatal("no advertisement was delivered")
 		return nil

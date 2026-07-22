@@ -16,9 +16,17 @@ import (
 // Addr ...
 func (h *HCI) Addr() ble.Addr { return h.addr }
 
-// SetAdvHandler ...
+// SetAdvHandler registers the handler that receives advertising reports.
+// Each registration installs a fresh delivery target (atomically — sktLoop
+// and the dispatcher read it concurrently): reports still queued for the
+// previous handler are discarded at dispatch instead of being delivered to
+// the new one. A nil handler stops delivery.
 func (h *HCI) SetAdvHandler(ah ble.AdvHandler) error {
-	h.advHandler = ah
+	if ah == nil {
+		h.advTgt.Store(nil)
+		return nil
+	}
+	h.advTgt.Store(&advTarget{fn: ah})
 	return nil
 }
 

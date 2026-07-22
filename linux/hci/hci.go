@@ -52,7 +52,7 @@ func NewHCI(opts ...ble.Option) (*HCI, error) {
 		chMasterConn: make(chan *Conn),
 		chSlaveConn:  make(chan *Conn),
 
-		chAdv: make(chan *Advertisement, 64),
+		chAdv: make(chan advDelivery, 64),
 
 		done: make(chan bool),
 	}
@@ -101,25 +101,30 @@ type HCI struct {
 	// adHist and adLast track the history of past scannable advertising packets.
 	// Controller delivers AD(Advertising Data) and SR(Scan Response) separately
 	// through HCI. Upon receiving an AD, no matter it's scannable or not, we
-	// pass a Advertisement (AD only) to advHandler immediately.
+	// pass a Advertisement (AD only) to the registered handler immediately.
 	// Upon receiving a SR, we search the AD history for the AD from the same
-	// device, and pass the Advertisiement (AD+SR) to advHandler.
+	// device, and pass the Advertisiement (AD+SR) to the handler.
 	// The adHist and adLast are allocated in the Scan().
 	// muAdHist guards adHist/adLast: handleLEAdvertisingReport reads and
 	// writes them on sktLoop while Scan() — notably its Disallowed
 	// reconciliation retries, which run precisely when the controller is
 	// still streaming reports — reallocates both from the caller's
 	// goroutine.
-	advHandler ble.AdvHandler
-	muAdHist   sync.Mutex
-	adHist     []*Advertisement
-	adLast     int
+	muAdHist sync.Mutex
+	adHist   []*Advertisement
+	adLast   int
+
+	// advTgt is the current advertisement delivery target, nil when no
+	// handler is registered. Atomic because SetAdvHandler writes it from
+	// the scanning caller's goroutine while sktLoop
+	// (handleLEAdvertisingReport) and the dispatcher goroutine read it.
+	advTgt atomic.Pointer[advTarget]
 
 	// chAdv feeds the single adv dispatcher goroutine. Scanning is lossy by
 	// nature: when the handler can't keep up the report is dropped rather
 	// than blocking sktLoop or spawning a goroutine per report, but every
 	// drop is counted (see AdvDropped).
-	chAdv      chan *Advertisement
+	chAdv      chan advDelivery
 	advDropped atomic.Uint64
 
 	// srOrphaned counts scan-response reports that matched no AD in the
@@ -706,7 +711,8 @@ func (h *HCI) handleLEMeta(b []byte) error {
 var errOrphanScanRsp = errors.New("hci: received scan response with no associated Advertising Data packet")
 
 func (h *HCI) handleLEAdvertisingReport(b []byte) error {
-	if h.advHandler == nil {
+	tgt := h.advTgt.Load()
+	if tgt == nil {
 		return nil
 	}
 
@@ -761,11 +767,12 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 		default:
 			a = newAdvertisement(e, i)
 		}
-		// Non-blocking hand-off to the dispatcher. A goroutine per report
-		// (the previous model) churns the scheduler at scan rates, delivers
-		// reports out of order, and leaks goroutines when a handler blocks.
+		// Non-blocking hand-off to the dispatcher, stamped with the target
+		// current at enqueue time. A goroutine per report (the previous
+		// model) churns the scheduler at scan rates, delivers reports out
+		// of order, and leaks goroutines when a handler blocks.
 		select {
-		case h.chAdv <- a:
+		case h.chAdv <- advDelivery{a: a, t: tgt}:
 		default:
 			h.advDropped.Add(1)
 		}
@@ -774,15 +781,35 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 	return orphanErr
 }
 
+// advTarget binds one registered advertisement handler to the queue entries
+// stamped for it. Every SetAdvHandler call allocates a fresh advTarget, so
+// pointer identity doubles as a scan generation: the dispatcher delivers an
+// entry only while its target is still the current one, which keeps reports
+// queued during one scan from leaking into the next scan's handler.
+type advTarget struct {
+	fn ble.AdvHandler
+}
+
+// advDelivery is one queued advertising report together with the delivery
+// target that was current when it was enqueued.
+type advDelivery struct {
+	a *Advertisement
+	t *advTarget
+}
+
 // advDispatcher delivers advertising reports to the registered handler, one
 // at a time and in arrival order. It runs for the lifetime of the HCI
 // instance and exits when h.done is closed (by sktLoop, on socket close).
 func (h *HCI) advDispatcher() {
 	for {
 		select {
-		case a := <-h.chAdv:
-			if f := h.advHandler; f != nil {
-				f(a)
+		case d := <-h.chAdv:
+			// Deliver only while the entry's target is still current:
+			// entries stamped for a superseded handler belong to an
+			// earlier scan and are dropped, never delivered to the
+			// handler that replaced it.
+			if h.advTgt.Load() == d.t {
+				d.t.fn(d.a)
 			}
 		case <-h.done:
 			return
