@@ -35,19 +35,32 @@ type Profile struct {
 	Services []*Service
 }
 
-// Find searches discovered profile for the specified target's type and UUID.
-// The target must has the type of *Service, *Characteristic, or *Descriptor.
+// Find searches the discovered profile for a match to target by type and
+// UUID. target must be a *Service, *Characteristic, or *Descriptor; the
+// result is the matching one, or an untyped nil when nothing matches or
+// target is some other type.
+//
+// The no-match case returns a genuine nil interface, not a typed nil: the
+// concrete FindX helpers return a nil *Service/*Characteristic/*Descriptor,
+// and returning that directly would box it into a non-nil any, so
+// `p.Find(x) == nil` never fired. Callers must still type-assert a non-nil
+// result to the concrete type.
 func (p *Profile) Find(target any) any {
 	switch t := target.(type) {
 	case *Service:
-		return p.FindService(t)
+		if s := p.FindService(t); s != nil {
+			return s
+		}
 	case *Characteristic:
-		return p.FindCharacteristic(t)
+		if c := p.FindCharacteristic(t); c != nil {
+			return c
+		}
 	case *Descriptor:
-		return p.FindDescriptor(t)
-	default:
-		return nil
+		if d := p.FindDescriptor(t); d != nil {
+			return d
+		}
 	}
+	return nil
 }
 
 // FindService searches discoverd profile for the specified service and UUID
