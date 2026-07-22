@@ -38,3 +38,22 @@ jobs:
           go-version: '1.26.x'
       - name: Repeated core-package tests
         run: go test -count=25 -timeout 15m ./linux/att ./linux/gatt ./linux/hci
+
+  # Short fuzz smoke over the hostile-peer PDU parsers: the seed corpora and
+  # committed regression inputs always run via `go test`, but a brief active
+  # fuzz each build keeps the surface honest as the parsers change. (A byte
+  # overflow in the advertising field walker — a remote hang — was found
+  # exactly here.)
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Fuzz ATT server dispatch
+        run: go test -run='^$' -fuzz=FuzzServerHandleRequest -fuzztime=60s ./linux/att
+      - name: Fuzz advertising report parser
+        run: go test -run='^$' -fuzz=FuzzHandleLEAdvertisingReport -fuzztime=60s ./linux/hci
+      - name: Fuzz SMP handler
+        run: go test -run='^$' -fuzz=FuzzHandleSMP -fuzztime=45s ./linux/hci

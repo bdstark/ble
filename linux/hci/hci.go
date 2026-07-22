@@ -470,6 +470,12 @@ func poolableEvtPkt(b []byte) bool {
 	if len(b) < 2 || len(b) > evtBufSize || b[0] != pktTypeEvent {
 		return false
 	}
+	// Only events whose payload is fully consumed inside handlePkt may be
+	// pooled. LE Meta events MUST NOT be added here: advertising reports
+	// are retained past handlePkt's return (the scan history and the
+	// queued Advertisements alias the payload for as long as the app holds
+	// them), so recycling their buffer would rewrite live advertisements —
+	// corrupted pairing data at best, accessor panics at worst.
 	switch int(b[1]) {
 	case evt.CommandCompleteCode, evt.CommandStatusCode, evt.NumberOfCompletedPacketsCode:
 		return true
@@ -695,6 +701,12 @@ func (h *HCI) handleEvt(b []byte) error {
 }
 
 func (h *HCI) handleLEMeta(b []byte) error {
+	// An LE Meta event with an empty payload has no subevent code; indexing
+	// it would panic sktLoop and take the whole adapter down on one bad
+	// packet from the controller.
+	if len(b) == 0 {
+		return errors.New("hci: LE Meta event with empty payload")
+	}
 	subcode := int(b[0])
 	if f := h.subh[subcode]; f != nil {
 		return f(b)
@@ -710,7 +722,37 @@ func (h *HCI) handleLEMeta(b []byte) error {
 // path (see also SROrphaned).
 var errOrphanScanRsp = errors.New("hci: received scan response with no associated Advertising Data packet")
 
+// validAdvReport reports whether an LE Advertising Report payload is
+// self-consistent [Vol 4, Part E, 7.7.65.2]: the declared report count and
+// per-report data lengths must exactly account for the payload. The evt
+// accessors are raw index expressions, so a truncated or length-corrupted
+// event would otherwise panic sktLoop — one bad packet from the controller
+// taking down the whole adapter.
+func validAdvReport(e evt.LEAdvertisingReport) bool {
+	if len(e) < 2 {
+		return false
+	}
+	n := int(e.NumReports())
+	if n == 0 {
+		return false
+	}
+	// Fixed part: subevent(1) + count(1) + n*(evtType(1) + addrType(1) +
+	// addr(6) + dataLen(1)); then the variable data runs; then n RSSI bytes.
+	fixed := 2 + 9*n
+	if len(e) < fixed+n {
+		return false
+	}
+	total := 0
+	for i := 0; i < n; i++ {
+		total += int(e.LengthData(i))
+	}
+	return len(e) == fixed+total+n
+}
+
 func (h *HCI) handleLEAdvertisingReport(b []byte) error {
+	if !validAdvReport(evt.LEAdvertisingReport(b)) {
+		return fmt.Errorf("hci: malformed LE Advertising Report (%d bytes)", len(b))
+	}
 	tgt := h.advTgt.Load()
 	if tgt == nil {
 		return nil

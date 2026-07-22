@@ -173,12 +173,16 @@ func (p *Packet) Field(typ byte) []byte {
 		if len(b) < 2 {
 			return nil
 		}
-		l, t := b[0], b[1]
-		if int(l) < 1 || len(b) < int(1+l) {
+		// l is the AD structure length (type byte + data). Compute the
+		// stride in int: 1+l as byte arithmetic overflows to 0 when l is
+		// 0xff, which left b unadvanced and spun this loop forever — a
+		// remote DoS, since l is peer-controlled advertising data.
+		l, t := int(b[0]), b[1]
+		if l < 1 || len(b) < 1+l {
 			return nil
 		}
 		if t == typ {
-			return b[2 : 2+l-1]
+			return b[2 : 1+l]
 		}
 		b = b[1+l:]
 	}
@@ -209,13 +213,16 @@ func (p *Packet) fieldPos(typ byte, offset int) ([]byte, int) {
 	}
 
 	for len(b) > 0 {
-		l, t := b[0], b[1]
-		if int(l) < 1 || len(b) < int(1+l) {
+		// int arithmetic on the length: byte(1+l) overflows to 0 at l==0xff
+		// and would spin this walk forever on peer-controlled data (see
+		// Field).
+		l, t := int(b[0]), b[1]
+		if l < 1 || len(b) < 1+l {
 			return nil, pos + len(b)
 		}
 		if t == typ {
-			r := b[2 : 2+l-1]
-			return r, pos + 1 + int(l)
+			r := b[2 : 1+l]
+			return r, pos + 1 + l
 		}
 		b = b[1+l:]
 		pos += 1 + int(l)
@@ -226,13 +233,18 @@ func (p *Packet) fieldPos(typ byte, offset int) ([]byte, int) {
 	return nil, pos
 }
 
-// Flags returns the flags of the packet.
-func (p *Packet) Flags() (flags byte, present bool) {
+// Flags returns the flags of the packet. [Vol 3, Part C, 11 / CSS Part A]
+func (p *Packet) Flags() (byte, bool) {
+	// The named return must NOT be called flags: it would shadow the
+	// package-level flags AD-type constant, and p.Field(flags) would query
+	// type 0x00. Field returns the structure DATA (header already
+	// stripped), so the flags octet is b[0]; the old b[2] read behind a
+	// len < 2 guard never fired for the one-byte flags field either.
 	b := p.Field(flags)
-	if len(b) < 2 {
+	if len(b) < 1 {
 		return 0, false
 	}
-	return b[2], true
+	return b[0], true
 }
 
 // LocalName returns the ShortName or CompleteName if it presents.
@@ -245,11 +257,15 @@ func (p *Packet) LocalName() string {
 
 // TxPower returns the TxPower, if it presents.
 func (p *Packet) TxPower() (power int, present bool) {
+	// The TX Power Level structure carries one signed octet of data, at
+	// b[0] once Field has stripped the header. The old code read b[2]
+	// behind a len < 3 guard that a one-byte payload never satisfied, so
+	// TxPower (and Advertisement.TxPowerLevel) always returned 0.
 	b := p.Field(txPower)
-	if len(b) < 3 {
+	if len(b) < 1 {
 		return 0, false
 	}
-	return int(int8(b[2])), true
+	return int(int8(b[0])), true
 }
 
 // UUIDs returns a list of service UUIDs.
@@ -271,7 +287,9 @@ func (p *Packet) ServiceSol() []ble.UUID {
 		u = uuidList(u, b, 2)
 	}
 	if b := p.Field(serviceSol32); b != nil {
-		u = uuidList(u, b, 16)
+		// 32-bit UUIDs are 4 bytes; the old width of 16 parsed them as
+		// garbage 128-bit entries (and dropped three of every four).
+		u = uuidList(u, b, 4)
 	}
 	if b := p.Field(serviceSol128); b != nil {
 		u = uuidList(u, b, 16)
@@ -299,20 +317,28 @@ func (p *Packet) ManufacturerData() []byte {
 	return p.Field(manufacturerData)
 }
 
-// Utility function for creating a list of uuids.
+// uuidList appends the w-byte UUIDs packed in d. The field data is
+// peer-controlled: a trailing run shorter than w is dropped rather than
+// sliced past its end (the old loop panicked on it).
 func uuidList(u []ble.UUID, d []byte, w int) []ble.UUID {
-	for len(d) > 0 {
+	for len(d) >= w {
 		u = append(u, ble.UUID(d[:w]))
 		d = d[w:]
 	}
 	return u
 }
 
+// serviceDataList decodes one Service Data structure: a w-byte UUID
+// followed by the data. A structure shorter than its UUID width is dropped
+// — the old code called make with a negative length and panicked — and the
+// data copy starts after the UUID, where the old code always copied from
+// byte 2 and corrupted 32- and 128-bit service data.
 func serviceDataList(sd []ble.ServiceData, d []byte, w int) []ble.ServiceData {
-	serviceData := ble.ServiceData{
-		UUID: ble.UUID(d[:w]),
-		Data: make([]byte, len(d)-w),
+	if len(d) < w {
+		return sd
 	}
-	copy(serviceData.Data, d[2:])
-	return append(sd, serviceData)
+	return append(sd, ble.ServiceData{
+		UUID: ble.UUID(d[:w]),
+		Data: append([]byte(nil), d[w:]...),
+	})
 }

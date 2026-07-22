@@ -16,12 +16,16 @@ go test -count=1 -coverprofile=/tmp/cover.out -coverpkg=./...,github.com/bdstark
 python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 ```
 
-## Current state (2026-07-21, measured on macOS)
+## Current state (2026-07-22, measured on macOS)
 
 | Scope | Coverage |
 |---|---|
 | All added lines | **91.7%** (1521/1658) |
 | Added lines excluding `darwin/` | **99.6%** (1521/1527) |
+
+The post-v0.1.0 tranche (prepared-write queue, params locking, adv-field
+overflow fix, fuzz targets) lands at **100% of its added lines** (159/159),
+measured with `diffcover.py . v0.1.0 <cover.out>`.
 
 Every changed file is at 100% of its added lines except the ones below.
 The linux backend is pure Go above the socket layer, so all of it —

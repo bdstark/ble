@@ -345,9 +345,42 @@ func TestAdvReportDropCount(t *testing.T) {
 
 // TestAdvReportNilHandler: without a handler the report is ignored.
 func TestAdvReportNilHandler(t *testing.T) {
-	h := &HCI{}
+	h := newAdvHCI(4)
+	h.advTgt.Store(nil)
 	if err := h.handleLEAdvertisingReport(advReportPkt(evtTypAdvInd, 0x01, nil)); err != nil {
 		t.Fatalf("handleLEAdvertisingReport = %v, want nil", err)
+	}
+}
+
+// TestAdvReportMalformed: a report whose declared lengths don't account for
+// the payload is rejected before any accessor runs — the parse is on
+// sktLoop, where a panic would take down the adapter.
+func TestAdvReportMalformed(t *testing.T) {
+	h := newAdvHCI(4)
+	cases := map[string][]byte{
+		"empty":            {},
+		"header only":      {0x02, 0x01},
+		"zero reports":     {0x02, 0x00},
+		"data len too big": {0x02, 0x01, evtTypAdvInd, 0x00, 1, 2, 3, 4, 5, 6, 0xFF, 0xAA},
+		"missing rssi":     {0x02, 0x01, evtTypAdvInd, 0x00, 1, 2, 3, 4, 5, 6, 0x01, 0xAA},
+	}
+	for name, b := range cases {
+		if err := h.handleLEAdvertisingReport(b); err == nil {
+			t.Errorf("%s: handleLEAdvertisingReport = nil, want a malformed-report error", name)
+		}
+		if len(h.chAdv) != 0 {
+			t.Fatalf("%s: a malformed report was queued", name)
+		}
+	}
+}
+
+// TestHandleLEMetaEmptyPayload: an LE Meta event with no payload has no
+// subevent code; handleLEMeta must reject it, not index b[0] and panic
+// sktLoop.
+func TestHandleLEMetaEmptyPayload(t *testing.T) {
+	h := &HCI{}
+	if err := h.handleLEMeta(nil); err == nil {
+		t.Fatal("handleLEMeta(nil) = nil, want an empty-payload error")
 	}
 }
 
