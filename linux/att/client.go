@@ -81,9 +81,6 @@ func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU 
 	}
 	defer func() { c.chTxBuf <- txBuf }()
 
-	// Let L2CAP know the MTU we can handle.
-	c.l2c.SetRxMTU(clientRxMTU)
-
 	req := ExchangeMTURequest(txBuf[:3])
 	req.SetAttributeOpcode()
 	req.SetClientRxMTU(uint16(clientRxMTU))
@@ -108,15 +105,20 @@ func (c *Client) ExchangeMTU(ctx context.Context, clientRxMTU int) (serverRxMTU 
 
 	// Validate the server's MTU before adopting it: a value below the spec
 	// minimum would shrink txBuf under the fixed-size request headers and
-	// panic a later txBuf[:n] slice; an oversized one is capped at what we
-	// support.
-	txMTU := int(rsp.ServerRxMTU())
-	if txMTU < ble.DefaultMTU {
-		return 0, fmt.Errorf("server MTU %d below minimum %d: %w", txMTU, ble.DefaultMTU, ErrInvalidMTU)
+	// panic a later txBuf[:n] slice.
+	serverRxMTU = int(rsp.ServerRxMTU())
+	if serverRxMTU < ble.DefaultMTU {
+		return 0, fmt.Errorf("server MTU %d below minimum %d: %w", serverRxMTU, ble.DefaultMTU, ErrInvalidMTU)
 	}
-	if txMTU > ble.MaxMTU {
-		txMTU = ble.MaxMTU
-	}
+
+	// ATT_MTU is the minimum of what each side can receive [Vol 3, Part F,
+	// 3.4.2.2] — a server advertising more than we asked for must not
+	// tempt us past our own request. The new MTU applies only now, after a
+	// successful exchange: failure paths above leave the connection's
+	// RxMTU untouched instead of raising it for an exchange that never
+	// happened.
+	txMTU := min(serverRxMTU, clientRxMTU)
+	c.l2c.SetRxMTU(clientRxMTU)
 	if len(txBuf) != txMTU {
 		// Let L2CAP know the MTU that the remote device can handle.
 		c.l2c.SetTxMTU(txMTU)

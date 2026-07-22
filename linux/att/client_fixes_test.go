@@ -25,11 +25,14 @@ func waitCond(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met within 2s")
 }
 
-// mtuRecordConn records the last SetTxMTU value.
+// mtuRecordConn records the last SetTxMTU and SetRxMTU values.
 type mtuRecordConn struct {
 	*onceConn
 	txMTU atomic.Int64
+	rxMTU atomic.Int64
 }
+
+func (c *mtuRecordConn) SetRxMTU(mtu int) { c.rxMTU.Store(int64(mtu)) }
 
 // signalCloseConn defers the actual close of f.in to the feeder goroutine
 // (the sole sender): Close only raises closeSignal, so the bearer-poison
@@ -145,8 +148,11 @@ func TestExchangeMTUServerBelowMinimum(t *testing.T) {
 	}
 }
 
-// TestExchangeMTUServerOversizedCapped: a server advertising more than
-// ble.MaxMTU is capped at ble.MaxMTU.
+// TestExchangeMTUServerOversizedCapped: ATT_MTU is the minimum of the two
+// sides' receive MTUs [Vol 3, Part F, 3.4.2.2] — a server advertising more
+// than the client requested must not raise the result past the request.
+// (The old code capped only at ble.MaxMTU, letting writes exceed ATT_MTU
+// whenever the server advertised more than the client asked for.)
 func TestExchangeMTUServerOversizedCapped(t *testing.T) {
 	f := newOnceConn()
 	c := startClient(t, f)
@@ -158,8 +164,27 @@ func TestExchangeMTUServerOversizedCapped(t *testing.T) {
 		f.in <- rsp
 	}()
 	mtu, err := c.ExchangeMTU(context.Background(), 185)
-	if err != nil || mtu != ble.MaxMTU {
-		t.Fatalf("ExchangeMTU with server MTU 1000 = %d, %v, want %d capped", mtu, err, ble.MaxMTU)
+	if err != nil || mtu != 185 {
+		t.Fatalf("ExchangeMTU(185) with server MTU 1000 = %d, %v, want 185 (min of the two)", mtu, err)
+	}
+}
+
+// TestExchangeMTUFailureLeavesRxMTU: the new MTU applies only after a
+// successful exchange — an error response must leave the connection's
+// RxMTU untouched (the old code raised it before even sending the request).
+func TestExchangeMTUFailureLeavesRxMTU(t *testing.T) {
+	f := &mtuRecordConn{onceConn: newOnceConn()}
+	c := startClient(t, f)
+
+	go func() {
+		<-f.writes // the MTU request
+		f.in <- []byte{ErrorResponseCode, ExchangeMTURequestCode, 0x00, 0x00, byte(ble.ErrReqNotSupp)}
+	}()
+	if _, err := c.ExchangeMTU(context.Background(), 185); err == nil {
+		t.Fatal("ExchangeMTU with an error response returned nil")
+	}
+	if got := f.rxMTU.Load(); got != 0 {
+		t.Fatalf("SetRxMTU(%d) was called although the exchange failed", got)
 	}
 }
 
