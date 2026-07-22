@@ -43,9 +43,23 @@ type Server struct {
 
 	dummyRspWriter ble.ResponseWriter
 
-	// Store a write handler for defer execute once receiving ExecuteWriteRequest
-	prepareWriteRequestAttr *attr
-	prepareWriteRequestData bytes.Buffer
+	// prepared is the prepare-write queue [Vol 3, Part F, 3.4.6]: each
+	// Prepare Write Request appends its (attribute, offset, part value)
+	// until an Execute Write Request applies them in arrival order or
+	// discards them. preparedBytes tracks the queued payload total for the
+	// DoS cap. (The old implementation held a single attribute and one
+	// concatenated buffer: parts aimed at a second attribute silently
+	// appended to the first's data, and every offset was ignored.)
+	prepared      []preparedWrite
+	preparedBytes int
+}
+
+// preparedWrite is one queued Prepare Write Request.
+type preparedWrite struct {
+	a      *attr
+	handle uint16
+	offset uint16
+	value  []byte
 }
 
 // NewServer returns an ATT (Attribute Protocol) server.
@@ -611,19 +625,41 @@ func (s *Server) handlePrepareWriteRequest(r PrepareWriteRequest) []byte {
 		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), ble.ErrInvalidHandle)
 	}
 
-	// We don't support write to static value. Pass the request to upper layer.
-	if a == nil {
+	// Writability is checked at prepare time [Vol 3, Part F, 3.4.6.1], so a
+	// misdirected part fails immediately instead of poisoning the queue.
+	if a == nil || a.wh == nil {
 		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), ble.ErrWriteNotPerm)
 	}
 
-	if e := handleATT(a, s, r, ble.NewResponseWriter(nil)); e != ble.ErrSuccess {
-		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), e)
+	// Bound the queue: the peer controls the entry count and the payload
+	// sizes, so both are capped or this is a remote memory DoS.
+	value := r.PartAttributeValue()
+	if len(s.prepared) >= maxPreparedWrites || s.preparedBytes+len(value) > maxPreparedWriteBytes {
+		return newErrorResponse(r.AttributeOpcode(), r.AttributeHandle(), ble.ErrPrepQueueFull)
 	}
 
-	// Convert and validate the response.
+	// The part value must be copied: r is backed by the receive buffer,
+	// which is reused for the next inbound PDU.
+	s.prepared = append(s.prepared, preparedWrite{
+		a:      a,
+		handle: r.AttributeHandle(),
+		offset: r.ValueOffset(),
+		value:  append([]byte(nil), value...),
+	})
+	s.preparedBytes += len(value)
+
+	// The response echoes the request [Vol 3, Part F, 3.4.6.2].
 	rsp := PrepareWriteResponse(r)
 	rsp.SetAttributeOpcode()
 	return rsp
+}
+
+// clearPrepared empties the prepare-write queue. Both Execute Write flavors
+// end with an empty queue [Vol 3, Part F, 3.4.6.3] — cancel, success, and
+// failure alike.
+func (s *Server) clearPrepared() {
+	s.prepared = nil
+	s.preparedBytes = 0
 }
 
 func (s *Server) handleExecuteWriteRequest(r ExecuteWriteRequest) []byte {
@@ -635,19 +671,39 @@ func (s *Server) handleExecuteWriteRequest(r ExecuteWriteRequest) []byte {
 
 	switch r.Flags() {
 	case 0:
-		// 0x00 – Cancel all prepared writes
-		s.prepareWriteRequestAttr = nil
-		s.prepareWriteRequestData.Reset()
+		// 0x00 – Cancel all prepared writes.
+		s.clearPrepared()
 	case 1:
-		// 0x01 – Immediately write all pending prepared values.
-		// An empty queue executes trivially [Vol 3, Part F, 3.4.6.3]; the
-		// old code passed the nil attr into handleATT and panicked.
-		a := s.prepareWriteRequestAttr
-		if a == nil {
-			break
-		}
-		if e := handleATT(a, s, r, ble.NewResponseWriter(nil)); e != ble.ErrSuccess {
-			return newErrorResponse(r.AttributeOpcode(), 0, e)
+		// 0x01 – Write all pending prepared values in the order received
+		// [Vol 3, Part F, 3.4.6.3]. An empty queue executes trivially.
+		// Contiguous parts to the same attribute (each part starting where
+		// the previous ended) are the wire form of a GATT long write
+		// [Vol 3, Part G, 4.9.4], so they are reassembled and delivered to
+		// the handler as ONE write at the run's starting offset; an
+		// attribute change or an offset gap ends the run. On a handler
+		// failure the Error Response carries the failing attribute's
+		// handle, and the queue is emptied regardless of outcome.
+		defer s.clearPrepared()
+		for i := 0; i < len(s.prepared); {
+			p := s.prepared[i]
+			data := p.value
+			next := int(p.offset) + len(p.value)
+			j := i + 1
+			for ; j < len(s.prepared); j++ {
+				q := s.prepared[j]
+				if q.a != p.a || int(q.offset) != next {
+					break
+				}
+				data = append(data, q.value...)
+				next += len(q.value)
+			}
+			rw := ble.NewResponseWriter(nil)
+			rw.SetStatus(ble.ErrSuccess)
+			p.a.wh.ServeWrite(ble.NewRequest(s.conn, data, int(p.offset)), rw)
+			if e := rw.Status(); e != ble.ErrSuccess {
+				return newErrorResponse(r.AttributeOpcode(), p.handle, e)
+			}
+			i = j
 		}
 	default:
 		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
@@ -681,9 +737,13 @@ func (s *Server) handleWriteCommand(r WriteCommand) []byte {
 
 // maxPreparedWriteBytes caps the total payload a peer may stage across
 // Prepare Write requests before Execute Write; beyond it the server answers
-// Prepare Queue Full [Vol 3, Part F, 3.4.6.1]. A variable so tests (or
-// embedders) can tune it.
-var maxPreparedWriteBytes = 512
+// Prepare Queue Full [Vol 3, Part F, 3.4.6.1]. maxPreparedWrites caps the
+// entry count for the same reason (empty-valued parts cost queue slots but
+// no payload bytes). Variables so tests (or embedders) can tune them.
+var (
+	maxPreparedWriteBytes = 512
+	maxPreparedWrites     = 64
+)
 
 func newErrorResponse(op byte, h uint16, s ble.ATTError) []byte {
 	r := ErrorResponse(make([]byte, 5))
@@ -719,38 +779,10 @@ func handleATT(a *attr, s *Server, req []byte, rsp ble.ResponseWriter) ble.ATTEr
 		}
 		offset = int(ReadBlobRequest(req).ValueOffset())
 		a.rh.ServeRead(ble.NewRequest(conn, data, offset), rsp)
-	case PrepareWriteRequestCode:
-		if a.wh == nil {
-			return ble.ErrWriteNotPerm
-		}
-		data = PrepareWriteRequest(req).PartAttributeValue()
-		if logDebugEnabled() {
-			ble.Logger.Debug("handleATT PartAttributeValue",
-				"data", fmt.Sprintf("%x", data),
-				"offset", int(PrepareWriteRequest(req).ValueOffset()),
-				"attr", fmt.Sprintf("%p", s.prepareWriteRequestAttr))
-		}
-
-		if s.prepareWriteRequestAttr == nil {
-			s.prepareWriteRequestAttr = a
-			s.prepareWriteRequestData.Reset()
-		}
-		// Bound the queue: the peer controls both the number of prepare
-		// writes and their payload sizes, so an unbounded append is a
-		// remote memory DoS.
-		if s.prepareWriteRequestData.Len()+len(data) > maxPreparedWriteBytes {
-			return ble.ErrPrepQueueFull
-		}
-		s.prepareWriteRequestData.Write(data)
-
-	case ExecuteWriteRequestCode:
-		if a.wh == nil {
-			return ble.ErrWriteNotPerm
-		}
-		data = s.prepareWriteRequestData.Bytes()
-		a.wh.ServeWrite(ble.NewRequest(conn, data, offset), rsp)
-		s.prepareWriteRequestAttr = nil
-		s.prepareWriteRequestData.Reset()
+	// PrepareWriteRequestCode / ExecuteWriteRequestCode are handled by
+	// handlePrepareWriteRequest / handleExecuteWriteRequest directly: the
+	// prepare queue spans attributes, which doesn't fit this one-attribute
+	// dispatch.
 	case WriteRequestCode:
 		fallthrough
 	case WriteCommandCode:

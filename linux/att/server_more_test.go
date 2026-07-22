@@ -410,6 +410,112 @@ func TestServerPrepareExecuteWrite(t *testing.T) {
 	wantBytes(t, rsp(ro, PrepareWriteRequestCode, 0x03, 0x00, 0x00, 0x00, 'x'), 0x01, 0x16, 0x03, 0x00, 0x03)
 }
 
+// prepare drives one Prepare Write Request through the server and asserts
+// the response echoes it [Vol 3, Part F, 3.4.6.2].
+func prepare(t *testing.T, s *Server, handle uint16, offset uint16, value string) {
+	t.Helper()
+	pdu := []byte{PrepareWriteRequestCode, byte(handle), byte(handle >> 8), byte(offset), byte(offset >> 8)}
+	pdu = append(pdu, value...)
+	want := append([]byte{PrepareWriteResponseCode}, pdu[1:]...)
+	wantBytes(t, s.handleRequest(pdu), want...)
+}
+
+// recordedWrite is one ServeWrite delivery captured by twoCharService.
+type recordedWrite struct {
+	handle uint16
+	offset int
+	data   string
+}
+
+// twoCharService returns a service with two writable characteristics (value
+// handles 3 and 5) whose handlers record every delivery; a write to failH
+// (if nonzero) answers ErrUnlikely instead.
+func twoCharService(got *[]recordedWrite, failH uint16) *ble.Service {
+	svc := ble.NewService(ble.UUID16(0x1815))
+	rec := func(h uint16) ble.WriteHandler {
+		return ble.WriteHandlerFunc(func(req ble.Request, rsp ble.ResponseWriter) {
+			if h == failH {
+				rsp.SetStatus(ble.ErrUnlikely)
+				return
+			}
+			*got = append(*got, recordedWrite{h, req.Offset(), string(req.Data())})
+		})
+	}
+	svc.NewCharacteristic(ble.UUID16(0x2A56)).HandleWrite(rec(3))
+	svc.NewCharacteristic(ble.UUID16(0x2A57)).HandleWrite(rec(5))
+	return svc
+}
+
+// TestServerPrepareExecuteMultiAttr: the queue spans attributes and honors
+// offsets. Contiguous parts to one attribute are reassembled into a single
+// delivery at the run's starting offset (the GATT long write); an attribute
+// change or an offset gap starts a new delivery. (The old implementation
+// held one attribute and ignored every offset: parts aimed at a second
+// attribute silently appended to the first's data.)
+func TestServerPrepareExecuteMultiAttr(t *testing.T) {
+	var got []recordedWrite
+	s := newTestServer(t, newOnceConn(), twoCharService(&got, 0))
+
+	prepare(t, s, 3, 0, "he")
+	prepare(t, s, 3, 2, "llo") // contiguous: reassembles with the part above
+	prepare(t, s, 5, 4, "xy")  // different attribute, nonzero start offset
+	prepare(t, s, 3, 10, "z")  // gap: separate delivery
+	wantBytes(t, rsp(s, ExecuteWriteRequestCode, 0x01), ExecuteWriteResponseCode)
+
+	want := []recordedWrite{{3, 0, "hello"}, {5, 4, "xy"}, {3, 10, "z"}}
+	if len(got) != len(want) {
+		t.Fatalf("deliveries = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("delivery %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// The queue emptied on execute: a repeat execute delivers nothing.
+	wantBytes(t, rsp(s, ExecuteWriteRequestCode, 0x01), ExecuteWriteResponseCode)
+	if len(got) != len(want) {
+		t.Fatalf("repeat execute delivered %d extra writes", len(got)-len(want))
+	}
+}
+
+// TestServerExecuteWriteErrorHandle: a handler failure mid-execution answers
+// with the FAILING attribute's handle [Vol 3, Part F, 3.4.6.3], earlier
+// entries have already been written (order is preserved), and the queue is
+// emptied regardless of the failure.
+func TestServerExecuteWriteErrorHandle(t *testing.T) {
+	var got []recordedWrite
+	s := newTestServer(t, newOnceConn(), twoCharService(&got, 5))
+
+	prepare(t, s, 3, 0, "ok")
+	prepare(t, s, 5, 0, "boom")
+	// Error Response: req opcode 0x18, handle 0x0005, ErrUnlikely (0x0E).
+	wantBytes(t, rsp(s, ExecuteWriteRequestCode, 0x01), 0x01, 0x18, 0x05, 0x00, 0x0E)
+	if len(got) != 1 || got[0] != (recordedWrite{3, 0, "ok"}) {
+		t.Fatalf("deliveries before the failure = %+v, want the handle-3 write only", got)
+	}
+	// Failure also emptied the queue.
+	wantBytes(t, rsp(s, ExecuteWriteRequestCode, 0x01), ExecuteWriteResponseCode)
+	if len(got) != 1 {
+		t.Fatalf("repeat execute after failure delivered %d extra writes", len(got)-1)
+	}
+}
+
+// TestServerPrepareQueueEntryCap: the entry count is bounded independently
+// of the byte cap — empty-valued parts cost slots, not bytes.
+func TestServerPrepareQueueEntryCap(t *testing.T) {
+	old := maxPreparedWrites
+	maxPreparedWrites = 2
+	t.Cleanup(func() { maxPreparedWrites = old })
+
+	var got []recordedWrite
+	s := newTestServer(t, newOnceConn(), twoCharService(&got, 0))
+	prepare(t, s, 3, 0, "a")
+	prepare(t, s, 3, 1, "b")
+	// Third entry: Prepare Queue Full (0x09).
+	wantBytes(t, rsp(s, PrepareWriteRequestCode, 0x03, 0x00, 0x02, 0x00, 'c'), 0x01, 0x16, 0x03, 0x00, 0x09)
+}
+
 // TestServerPrepareWriteTruncatedPDU: a Prepare Write PDU shorter than its
 // 5-byte fixed header must be rejected as an invalid PDU. The pre-fix code
 // validated only >= 3 bytes and panicked slicing the part value at r[5:].
