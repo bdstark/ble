@@ -684,15 +684,15 @@ func (c *Conn) closeChans() {
 }
 
 // kill initiates asynchronous teardown of the connection, at most once, and
-// reports whether this call was the initiating one. The goroutine is
-// mandatory, not a convenience: Close sends a Disconnect command whose
+// reports whether this call was the initiating one. The disposal goroutine
+// is mandatory, not a convenience: Close sends a Disconnect command whose
 // completion event only sktLoop can process, so calling it synchronously
 // from sktLoop's own call path (handleACL) would self-deadlock.
 func (c *Conn) kill() bool {
 	initiated := false
 	c.killOnce.Do(func() {
 		initiated = true
-		go c.Close()
+		c.hci.dispose(c)
 	})
 	return initiated
 }

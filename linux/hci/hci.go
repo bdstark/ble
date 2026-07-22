@@ -74,6 +74,13 @@ type HCI struct {
 	skt io.ReadWriteCloser
 	id  int
 
+	// wgConnDisposal tracks the goroutines that Close undeliverable or
+	// killed conns (dispose). Purely a join handle: production teardown
+	// never blocks on it, but the tests join it between cases so a
+	// disposal mid-Send cannot outlive its test and race the package's
+	// tunable timeout vars.
+	wgConnDisposal sync.WaitGroup
+
 	// Host to Controller command flow control [Vol 2, Part E, 4.4]
 	chCmdPkt  chan *pkt
 	chCmdBufs chan []byte
@@ -547,6 +554,19 @@ func (h *HCI) cleanupConns() {
 	}
 }
 
+// dispose runs c.Close on its own tracked goroutine. The goroutine is
+// mandatory for callers on sktLoop (kill, the undeliverable-conn paths in
+// handleLEConnectionComplete): Close sends a Disconnect command whose
+// completion only sktLoop can process, so an inline call would
+// self-deadlock.
+func (h *HCI) dispose(c *Conn) {
+	h.wgConnDisposal.Add(1)
+	go func() {
+		defer h.wgConnDisposal.Done()
+		c.Close()
+	}()
+}
+
 // cleanupConn force-removes c as though its DisconnectionComplete had been
 // processed: deregister, close channels, reclaim TX credits. Used by
 // Conn.Close when the Disconnect command failed and the event never arrived
@@ -846,7 +866,7 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 		select {
 		case h.chMasterConn <- c:
 		default:
-			go c.Close()
+			h.dispose(c)
 		}
 		return nil
 	}
@@ -860,7 +880,7 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 	select {
 	case h.chSlaveConn <- c:
 	default:
-		go c.Close()
+		h.dispose(c)
 	}
 	// When a controller accepts a connection, it moves from advertising
 	// state to idle/ready state. Host needs to explicitly ask the

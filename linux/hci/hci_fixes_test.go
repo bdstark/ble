@@ -40,6 +40,11 @@ func newLoopedHCIOn(t *testing.T, skt io.ReadWriteCloser, setup func(*HCI)) *HCI
 		case <-time.After(5 * time.Second):
 			t.Error("sktLoop did not exit")
 		}
+		// Join the conn-disposal goroutines: one still inside Close/Send
+		// would race the next test's writes to the tunable timeout vars.
+		// They unwind promptly once h is closed (send fails fast on the
+		// recorded error; cleanupConns closed every conn's chDone).
+		h.wgConnDisposal.Wait()
 	})
 	return h
 }
