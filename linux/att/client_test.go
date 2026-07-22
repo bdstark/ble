@@ -113,25 +113,28 @@ func TestLoopNotificationPooling(t *testing.T) {
 	}
 	f.Close()
 
-	// Wait until the async consumer has drained everything it was handed.
-	deadline := time.Now().Add(5 * time.Second)
-	var last uint64
+	// Every PDU is either handed to the consumer (eventually handled) or
+	// dropped-and-counted when the async queue is full. Wait for that
+	// accounting to balance: it is exact regardless of scheduler load, so
+	// the test asserts integrity, never throughput — the dispatcher is
+	// lossy by design, and a machine-dependent floor flakes under -count=N.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		cur := h.handled.Load()
-		if cur == last && cur > 0 {
+		if h.handled.Load()+h.bad.Load()+c.AsyncDropped() == total {
 			break
 		}
-		last = cur
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	if bad := h.bad.Load(); bad != 0 {
 		t.Fatalf("%d notifications had corrupted payloads at callback time", bad)
 	}
-	// Loop drops notifications when the asyncWork channel is full (by
-	// design), so only require that a healthy majority made it through.
-	if got := h.handled.Load(); got < total/2 {
-		t.Fatalf("handled %d of %d notifications; expected at least half", got, total)
+	handled, dropped := h.handled.Load(), c.AsyncDropped()
+	if handled+dropped != total {
+		t.Fatalf("handled %d + dropped %d != %d sent", handled, dropped, total)
+	}
+	if handled == 0 {
+		t.Fatal("every notification was dropped; the dispatch path never ran")
 	}
 	// Indications must have been confirmed.
 	select {
@@ -142,4 +145,67 @@ func TestLoopNotificationPooling(t *testing.T) {
 	default:
 		t.Fatal("no confirmation was written for indications")
 	}
+}
+
+// wedgeHandler blocks every callback until release is closed.
+type wedgeHandler struct {
+	release chan struct{}
+	handled atomic.Uint64
+}
+
+func (h *wedgeHandler) HandleNotification([]byte) {
+	<-h.release
+	h.handled.Add(1)
+}
+
+// TestLoopAsyncQueueDropsCounted wedges the async consumer so the 16-slot
+// queue fills, then proves every further PDU — notification or incoming
+// request — is dropped AND counted rather than blocking Loop. fakeConn.in
+// is unbuffered, so each send returns only after Loop fully processed the
+// previous PDU: once 17 PDUs are in (consumer holding at most one), the
+// queue is provably full and the arithmetic below is exact up to whether
+// the consumer picked up the first item (k ∈ {0,1}).
+func TestLoopAsyncQueueDropsCounted(t *testing.T) {
+	f := newFakeConn()
+	h := &wedgeHandler{release: make(chan struct{})}
+	c := NewClient(f, h)
+	go c.Loop()
+
+	notif := []byte{HandleValueNotificationCode, 0x42, 0x00, 0x01}
+	for i := 0; i < 17; i++ {
+		f.in <- notif
+	}
+	// Queue full from here: both enqueue paths must drop and count.
+	for i := 0; i < 5; i++ {
+		f.in <- []byte{ExchangeMTURequestCode, 0x17, 0x00} // request path
+	}
+	for i := 0; i < 5; i++ {
+		f.in <- notif // notification path
+	}
+	// A send returns when Loop receives the PDU, not when it finishes the
+	// drop bookkeeping for it — poll the counter to its settled value.
+	const total = 27
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && c.AsyncDropped() < 10 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := c.AsyncDropped(); got < 10 || got > 11 {
+		t.Fatalf("AsyncDropped = %d with a wedged consumer, want 10 or 11", got)
+	}
+
+	close(h.release)
+	// Exact accounting: every PDU was handled as a notification, answered
+	// as an MTU request (one response write each — the only writes in this
+	// test), or dropped-and-counted. The consumer frees its one slot at an
+	// arbitrary moment, so WHICH pdu got that slot varies; the sum doesn't.
+	acct := func() uint64 { return h.handled.Load() + c.AsyncDropped() + uint64(len(f.writes)) }
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && acct() != total {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := acct(); got != total {
+		t.Fatalf("handled %d + dropped %d + mtu responses %d != %d sent",
+			h.handled.Load(), c.AsyncDropped(), len(f.writes), total)
+	}
+	f.Close()
 }

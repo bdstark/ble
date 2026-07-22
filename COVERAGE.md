@@ -20,8 +20,8 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 
 | Scope | Coverage |
 |---|---|
-| All added lines | **91.7%** (1512/1649) |
-| Added lines excluding `darwin/` | **99.6%** (1512/1518) |
+| All added lines | **91.7%** (1521/1658) |
+| Added lines excluding `darwin/` | **99.6%** (1521/1527) |
 
 Every changed file is at 100% of its added lines except the ones below.
 The linux backend is pure Go above the socket layer, so all of it —

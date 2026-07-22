@@ -38,6 +38,11 @@ type Client struct {
 	// response (see RspDropped).
 	rspDropped atomic.Uint64
 
+	// asyncDropped counts notifications, indications, and incoming requests
+	// Loop dropped because the async dispatch queue was full, i.e. the
+	// handler could not keep up with the inbound rate (see AsyncDropped).
+	asyncDropped atomic.Uint64
+
 	// bearerClosed is set when a transaction hits the ATT sequential-protocol
 	// timeout. Per [Vol 3, Part F, 3.3.3] the bearer "shall be closed" at that
 	// point: any response arriving later could otherwise be mis-attributed to
@@ -621,6 +626,13 @@ func (c *Client) RspDropped() uint64 {
 	return c.rspDropped.Load()
 }
 
+// AsyncDropped returns the number of notifications, indications, and
+// incoming requests dropped because the async dispatch queue was full,
+// i.e. the notification handler could not keep up with the inbound rate.
+func (c *Client) AsyncDropped() uint64 {
+	return c.asyncDropped.Load()
+}
+
 // pduPool recycles the buffers behind PDUs that are dispatched to the
 // asyncWork consumer (notifications, indications, and incoming requests);
 // the consumer puts them back once the handler has returned, which is what
@@ -723,6 +735,7 @@ func (c *Client) Loop() {
 			case ch <- asyncWork{handle: c.handleRequest, data: b, buf: buf}:
 			default:
 				pduPool.Put(buf)
+				c.asyncDropped.Add(1)
 				// If this really happens, especially on a slow machine, enlarge the channel buffer.
 				ble.Logger.Error("client: can't enqueue incoming request")
 			}
@@ -734,6 +747,7 @@ func (c *Client) Loop() {
 		case ch <- asyncWork{handle: c.handler.HandleNotification, data: b, buf: buf}:
 		default:
 			pduPool.Put(buf)
+			c.asyncDropped.Add(1)
 			// If this really happens, especially on a slow machine, enlarge the channel buffer.
 			ble.Logger.Error("client: can't enqueue incoming notification")
 		}
