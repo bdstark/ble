@@ -452,6 +452,18 @@ func (p *Client) Unsubscribe(ctx context.Context, c *ble.Characteristic, ind boo
 	return p.setHandlers(ctx, c.CCCD.Handle, c.ValueHandle, cccNotify, nil)
 }
 
+// setHandlers reconciles the local subscription state and the peer's CCCD
+// for one flag. Local state must only ever record what the peer has
+// acknowledged: the old mutate-then-write order meant a failed CCCD write
+// left s.ccc set, so the caller's retry hit the already-subscribed early
+// return and reported success for a subscription the peer never enabled.
+//
+// Ordering per direction: subscribing installs the handler BEFORE the
+// write (the first notification can arrive the moment the write is acked)
+// and rolls back on failure; unsubscribing writes first and forgets the
+// handler only on success (a late notification still finds it). A
+// re-Subscribe on an enabled flag installs the new handler without a wire
+// write — it no longer silently keeps the old one.
 func (p *Client) setHandlers(ctx context.Context, cccdh, vh, flag uint16, h ble.NotificationHandler) error {
 	s, ok := p.subs[vh]
 	if !ok {
@@ -460,27 +472,52 @@ func (p *Client) setHandlers(ctx context.Context, cccdh, vh, flag uint16, h ble.
 		p.subs[vh] = s
 		p.subsMu.Unlock()
 	}
-	switch {
-	case h == nil && (s.ccc&flag) == 0:
+	if h == nil && (s.ccc&flag) == 0 {
 		return nil
-	case h != nil && (s.ccc&flag) != 0:
-		return nil
-	case h == nil && (s.ccc&flag) != 0:
-		s.ccc &= ^uint16(flag)
-	case h != nil && (s.ccc&flag) == 0:
-		s.ccc |= flag
 	}
 
-	v := make([]byte, 2)
-	binary.LittleEndian.PutUint16(v, s.ccc)
+	prevCCC := s.ccc
 	p.subsMu.Lock()
-	if flag == cccNotify {
-		s.nHandler = h
-	} else {
-		s.iHandler = h
+	prevH := s.nHandler
+	if flag == cccIndicate {
+		prevH = s.iHandler
 	}
 	p.subsMu.Unlock()
-	return p.ac.Write(ctx, s.cccdh, v)
+
+	setState := func(ccc uint16, handler ble.NotificationHandler) {
+		p.subsMu.Lock()
+		s.ccc = ccc
+		if flag == cccIndicate {
+			s.iHandler = handler
+		} else {
+			s.nHandler = handler
+		}
+		p.subsMu.Unlock()
+	}
+	writeCCC := func(ccc uint16) error {
+		v := make([]byte, 2)
+		binary.LittleEndian.PutUint16(v, ccc)
+		return p.ac.Write(ctx, s.cccdh, v)
+	}
+
+	if h != nil {
+		newCCC := prevCCC | flag
+		setState(newCCC, h)
+		if newCCC != prevCCC {
+			if err := writeCCC(newCCC); err != nil {
+				setState(prevCCC, prevH)
+				return err
+			}
+		}
+		return nil
+	}
+
+	newCCC := prevCCC &^ flag
+	if err := writeCCC(newCCC); err != nil {
+		return err
+	}
+	setState(newCCC, nil)
+	return nil
 }
 
 // ClearSubscriptions clears all subscriptions to notifications and indications.

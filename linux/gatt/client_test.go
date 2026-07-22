@@ -79,12 +79,13 @@ func (f *fakeConn) Disconnected() <-chan struct{} { return f.closed }
 type fakeServer struct {
 	conn *fakeConn
 
-	mu        sync.Mutex
-	readValue []byte       // payload of the Read Response
-	blobValue []byte       // payload of the Read Blob Response
-	failReads bool         // answer Read Requests with an ATT error response
-	discovery map[byte]int // per-opcode discovery request count
-	writeReqs [][]byte     // recorded Write Requests (0x12)
+	mu         sync.Mutex
+	readValue  []byte       // payload of the Read Response
+	blobValue  []byte       // payload of the Read Blob Response
+	failReads  bool         // answer Read Requests with an ATT error response
+	failWrites bool         // answer Write Requests with an ATT error response
+	discovery  map[byte]int // per-opcode discovery request count
+	writeReqs  [][]byte     // recorded Write Requests (0x12)
 
 	cmds chan []byte // Write Commands (0x52); they get no response
 }
@@ -175,6 +176,9 @@ func (s *fakeServer) respond(req []byte) []byte {
 	case att.ReadBlobRequestCode:
 		return append([]byte{att.ReadBlobResponseCode}, s.blobValue...)
 	case att.WriteRequestCode:
+		if s.failWrites {
+			return []byte{att.ErrorResponseCode, op, req[1], req[2], byte(ble.ErrWriteNotPerm)}
+		}
 		s.writeReqs = append(s.writeReqs, req)
 		return []byte{att.WriteResponseCode}
 	case att.WriteCommandCode:
@@ -208,6 +212,12 @@ func (s *fakeServer) setFailReads(fail bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failReads = fail
+}
+
+func (s *fakeServer) setFailWrites(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failWrites = fail
 }
 
 func newTestClient(t *testing.T) (*Client, *fakeServer) {

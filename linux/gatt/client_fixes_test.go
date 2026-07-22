@@ -217,3 +217,109 @@ func TestConcurrentSubscriptionChurn(t *testing.T) {
 		t.Fatal("concurrent subscription churn deadlocked")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// setHandlers: local state records only peer-acknowledged CCCD writes
+// ---------------------------------------------------------------------------
+
+// TestSubscribeFailedWriteAllowsRetry: a rejected CCCD write must leave the
+// subscription un-recorded, so the retry actually writes again. Previously
+// s.ccc was set before the write; the retry hit the already-subscribed
+// early return and reported success for a CCCD the peer never enabled.
+func TestSubscribeFailedWriteAllowsRetry(t *testing.T) {
+	cln, srv := newTestClient(t)
+	ctx := testCtx(t)
+	c := &ble.Characteristic{
+		ValueHandle: 3,
+		CCCD:        &ble.Descriptor{UUID: ble.ClientCharacteristicConfigUUID, Handle: 4},
+	}
+
+	srv.setFailWrites(true)
+	if err := cln.Subscribe(ctx, c, false, func([]byte) {}); err == nil {
+		t.Fatal("Subscribe with a rejected CCCD write returned nil")
+	}
+
+	notified := make(chan []byte, 1)
+	srv.setFailWrites(false)
+	if err := cln.Subscribe(ctx, c, false, func(b []byte) {
+		notified <- append([]byte(nil), b...)
+	}); err != nil {
+		t.Fatalf("Subscribe retry: %v", err)
+	}
+	// The retry must have reached the wire (the failed attempt recorded no
+	// write), and notifications must flow.
+	checkCCCDWrite(t, srv, 0, 4, cccNotify)
+	srv.conn.in <- []byte{att.HandleValueNotificationCode, 0x03, 0x00, 0x01}
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no notification after successful retry")
+	}
+}
+
+// TestResubscribeReplacesHandler: Subscribe on an already-enabled flag must
+// install the new handler (with no extra CCCD write), not silently keep the
+// old one.
+func TestResubscribeReplacesHandler(t *testing.T) {
+	cln, srv := newTestClient(t)
+	ctx := testCtx(t)
+	c := &ble.Characteristic{
+		ValueHandle: 3,
+		CCCD:        &ble.Descriptor{UUID: ble.ClientCharacteristicConfigUUID, Handle: 4},
+	}
+
+	first := make(chan []byte, 1)
+	if err := cln.Subscribe(ctx, c, false, func(b []byte) { first <- b }); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	second := make(chan []byte, 1)
+	if err := cln.Subscribe(ctx, c, false, func(b []byte) { second <- b }); err != nil {
+		t.Fatalf("re-Subscribe: %v", err)
+	}
+	if n := len(srv.writes()); n != 1 {
+		t.Fatalf("re-Subscribe wrote the CCCD again (%d writes, want 1)", n)
+	}
+
+	srv.conn.in <- []byte{att.HandleValueNotificationCode, 0x03, 0x00, 0x02}
+	select {
+	case <-second:
+	case <-first:
+		t.Fatal("notification delivered to the replaced handler")
+	case <-time.After(2 * time.Second):
+		t.Fatal("notification delivered to no handler")
+	}
+}
+
+// TestUnsubscribeFailedWriteKeepsHandler: a rejected disable write must keep
+// the subscription intact — the peer still believes it's enabled, so late
+// notifications must still find the handler, and a retry must write again.
+func TestUnsubscribeFailedWriteKeepsHandler(t *testing.T) {
+	cln, srv := newTestClient(t)
+	ctx := testCtx(t)
+	c := &ble.Characteristic{
+		ValueHandle: 3,
+		CCCD:        &ble.Descriptor{UUID: ble.ClientCharacteristicConfigUUID, Handle: 4},
+	}
+
+	notified := make(chan []byte, 1)
+	if err := cln.Subscribe(ctx, c, false, func(b []byte) { notified <- b }); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	srv.setFailWrites(true)
+	if err := cln.Unsubscribe(ctx, c, false); err == nil {
+		t.Fatal("Unsubscribe with a rejected CCCD write returned nil")
+	}
+	srv.conn.in <- []byte{att.HandleValueNotificationCode, 0x03, 0x00, 0x03}
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler forgotten although the peer still has notifications enabled")
+	}
+
+	srv.setFailWrites(false)
+	if err := cln.Unsubscribe(ctx, c, false); err != nil {
+		t.Fatalf("Unsubscribe retry: %v", err)
+	}
+	checkCCCDWrite(t, srv, 1, 4, 0x0000)
+}
