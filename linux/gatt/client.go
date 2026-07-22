@@ -40,6 +40,12 @@ type Client struct {
 
 	profile *ble.Profile
 	name    string
+	// nameRead marks the GAP Device Name as resolved — including the
+	// deterministic negative outcomes (peer exposes none, malformed
+	// response) — so Name() never re-runs its round trips per call. A
+	// peer without the attribute used to cost two ATT exchanges under the
+	// client-wide lock on EVERY Name() call (e.g. from a logging path).
+	nameRead bool
 
 	// subsMu guards subs and each sub's handler fields for HandleNotification,
 	// which must not touch the embedded client-wide mutex: request methods hold
@@ -66,26 +72,35 @@ func (p *Client) Addr() ble.Addr {
 // the GAP Device Name characteristic (service 0x1800, characteristic 0x2A00)
 // on first call and cached thereafter.
 //
-// Name keeps its error-free signature — it is a convenience accessor. On any
-// failure (peer exposes no GAP Device Name, ATT error, dead link) it logs at
-// debug level and returns ""; the next call retries. The read locates the
-// characteristic value directly with an ATT Read By Type request, so the
-// caller need not have discovered service 0x1800 first; each round trip is
-// bounded by the ATT bearer's own transaction timeout.
+// Name keeps its error-free signature — it is a convenience accessor. On
+// failure it logs at debug level and returns "". Deterministic outcomes —
+// success, a peer that exposes no GAP Device Name, a malformed response —
+// are cached, so at most one call ever pays the round trips; transient
+// failures (ATT error, dead link) are not cached and the next call
+// retries. The read locates the characteristic value directly with an ATT
+// Read By Type request, so the caller need not have discovered service
+// 0x1800 first; each round trip is bounded by the ATT bearer's own
+// transaction timeout.
 func (p *Client) Name() string {
 	p.Lock()
 	defer p.Unlock()
-	if p.name != "" {
+	if p.nameRead {
 		return p.name
 	}
 	ctx := context.Background()
 	length, b, err := p.ac.ReadByType(ctx, 0x0001, 0xFFFF, ble.DeviceNameUUID)
+	if errors.Is(err, ble.ErrAttrNotFound) {
+		// The peer has no GAP Device Name — a stable fact, cache it.
+		p.nameRead = true
+		return ""
+	}
 	if err != nil {
 		ble.Logger.Debug("gatt: reading GAP device name", "err", err)
 		return ""
 	}
 	if length < 2 || len(b) < length {
 		ble.Logger.Debug("gatt: malformed GAP device name response", "length", length, "data", len(b))
+		p.nameRead = true // deterministic peer bug; retrying won't unmangle it
 		return ""
 	}
 	// First entry: value handle (2 bytes) + as much of the value as fit in
@@ -98,6 +113,7 @@ func (p *Client) Name() string {
 		return ""
 	}
 	p.name = string(v)
+	p.nameRead = true
 	return p.name
 }
 

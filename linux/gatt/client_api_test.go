@@ -521,3 +521,27 @@ func TestHandleNotificationRunt(t *testing.T) {
 		cln.HandleNotification(pdu) // must not panic
 	}
 }
+
+// TestNameCachesNoNameOutcome: a peer without a GAP Device Name must cost
+// at most one pair of round trips — the negative outcome is cached, so a
+// Name() in a logging path doesn't re-run ATT exchanges (under the
+// client-wide lock) on every call.
+func TestNameCachesNoNameOutcome(t *testing.T) {
+	var reads atomic.Int64
+	cln := newRespondingClient(t, func(req []byte) []byte {
+		if req[0] == att.ReadByTypeRequestCode && rbtUUID16(req) == 0x2A00 {
+			reads.Add(1)
+			return attErr(req[0], rbtStart(req), ble.ErrAttrNotFound)
+		}
+		return nil
+	})
+
+	for i := 0; i < 3; i++ {
+		if got := cln.Name(); got != "" {
+			t.Fatalf("Name() = %q, want \"\"", got)
+		}
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("peer without a name was asked %d times, want 1 (cached)", got)
+	}
+}
