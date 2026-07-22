@@ -45,6 +45,19 @@ type Client struct {
 	// ErrBearerClosed instead of touching the (closing) connection.
 	bearerClosed atomic.Bool
 
+	// abandonedRsp / abandonedDeadline record a request abandoned by context
+	// cancellation after it reached the wire: the response opcode it still
+	// expects and the absolute transaction deadline it was subject to. ATT is
+	// a sequential protocol, so that transaction still owns the bearer — the
+	// next request resolves it (sendReq waits for its response or its
+	// deadline) before writing, otherwise a straggling same-opcode or Error
+	// Response would be consumed as the new request's answer: silently stale
+	// data. Both fields are touched only while holding the tx buffer
+	// (chTxBuf), which serializes requests, so they need no locking. A zero
+	// abandonedRsp means no abandoned transaction is outstanding.
+	abandonedRsp      byte
+	abandonedDeadline time.Time
+
 	rxBuf   []byte
 	chTxBuf chan []byte
 	chErr   chan error
@@ -471,12 +484,18 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	if c.bearerClosed.Load() {
 		return nil, fmt.Errorf("ATT request refused: %w", ErrBearerClosed)
 	}
+	// A previously abandoned request may still own the bearer; resolve it
+	// before writing, or its straggling response would be consumed as this
+	// request's answer.
+	if err := c.resolveAbandoned(ctx); err != nil {
+		return nil, err
+	}
 	if logDebugEnabled() {
 		ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
 	}
-	// Drain the response of an earlier abandoned request (ctx cancellation
-	// or ATT timeout), if one straggled in since: it would otherwise be
-	// mistaken for the response to this request. rspc is buffered (cap 1)
+	// Defense in depth: with no abandoned transaction outstanding, anything
+	// sitting in rspc is a response PDU the peer sent unsolicited — drop it
+	// rather than let it pair with this request. rspc is buffered (cap 1)
 	// and Loop's send is non-blocking, so an unclaimed response sits in the
 	// buffer rather than parking Loop — and there is never more than one,
 	// because Loop drops (and counts) further responses while the buffer is
@@ -484,7 +503,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	select {
 	case stale := <-c.rspc:
 		if logDebugEnabled() {
-			ble.Logger.Debug("client: dropping stale rsp of an abandoned request", "pdu", fmt.Sprintf("% X", stale))
+			ble.Logger.Debug("client: dropping unsolicited rsp", "pdu", fmt.Sprintf("% X", stale))
 		}
 	default:
 	}
@@ -494,6 +513,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	// One absolute deadline for the whole transaction [Vol 3, Part F, 3.3.3]:
 	// a per-iteration time.After would be reset by every unexpected PDU,
 	// letting a chatty peer extend the timeout indefinitely.
+	deadline := time.Now().Add(seqProtoTimeout)
 	t := time.NewTimer(seqProtoTimeout)
 	defer t.Stop()
 	for {
@@ -520,14 +540,12 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			// Abandonment by the caller, not a protocol failure: the peer may
 			// still answer, so the bearer stays usable. Deliberately NOT
 			// poisoned — callers cancel requests during normal shutdown and
-			// reconnect, where connection teardown follows immediately.
-			// Residual hazard: if the next same-opcode request is written
-			// before the abandoned one's response arrives, that stale
-			// response can be consumed as the new request's answer. The
-			// cap-1 rspc buffer and the pre-request drain only catch
-			// stragglers landing between requests; closing the window
-			// would require holding the transaction slot until the response
-			// or the absolute timeout.
+			// reconnect, where connection teardown follows immediately. But
+			// the transaction is still outstanding on the wire: record what
+			// it expects and when it expires, so the next request resolves
+			// it (resolveAbandoned) instead of racing its late response.
+			c.abandonedRsp = rspOfReq[b[0]]
+			c.abandonedDeadline = deadline
 			return nil, ctx.Err()
 		case <-t.C:
 			// The transaction timed out: per [Vol 3, Part F, 3.3.3] no
@@ -542,6 +560,56 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 				ble.Logger.Error("client: closing bearer after ATT timeout", "err", err)
 			}
 			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
+		}
+	}
+}
+
+// resolveAbandoned settles a transaction whose request reached the wire but
+// was abandoned by context cancellation before its response arrived. Called
+// by sendReq (under the tx-buffer slot) before it writes a new request: the
+// abandoned transaction still owns the bearer, and writing over it would let
+// its straggling response — same opcode, or an Error Response — be consumed
+// as the new request's answer.
+//
+// Outcomes: the late response arrives (dropped; the bearer is free again),
+// the abandoned transaction's own absolute deadline passes (a transaction
+// timeout — the bearer is poisoned and closed exactly as if the request had
+// timed out live [Vol 3, Part F, 3.3.3]), or ctx/transport gives out first
+// (the abandoned state persists for the next attempt).
+func (c *Client) resolveAbandoned(ctx context.Context) error {
+	if c.abandonedRsp == 0 {
+		return nil
+	}
+	// A negative remaining duration fires the timer immediately.
+	t := time.NewTimer(time.Until(c.abandonedDeadline))
+	defer t.Stop()
+	for {
+		select {
+		case rsp := <-c.rspc:
+			if rsp[0] == ErrorResponseCode || rsp[0] == c.abandonedRsp {
+				c.abandonedRsp = 0
+				if logDebugEnabled() {
+					ble.Logger.Debug("client: dropping late rsp of an abandoned request", "pdu", fmt.Sprintf("% X", rsp))
+				}
+				return nil
+			}
+			// Same peer quirk sendReq handles: some peers issue ATT requests
+			// asynchronously. Refuse and keep waiting for the abandoned
+			// transaction's response.
+			errRsp := newErrorResponse(rsp[0], 0x0000, ble.ErrReqNotSupp)
+			if _, err := c.l2c.Write(errRsp); err != nil {
+				return fmt.Errorf("unexpected ATT response received: %w", err)
+			}
+		case err := <-c.chErr:
+			return fmt.Errorf("ATT request failed: %w", err)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			c.bearerClosed.Store(true)
+			if err := c.l2c.Close(); err != nil {
+				ble.Logger.Error("client: closing bearer after ATT timeout", "err", err)
+			}
+			return fmt.Errorf("ATT request timeout (abandoned request never answered): %w", ErrSeqProtoTimeout)
 		}
 	}
 }

@@ -11,6 +11,12 @@ import "context"
 // the transport layer: an in-flight ACL write cannot be interrupted mid-write;
 // on the Linux stack it is independently bounded by hci.ACLWriteTimeout.
 //
+// A request abandoned after it reached the wire still owns the ATT bearer
+// (ATT is a sequential protocol). On the Linux stack the next request first
+// resolves that transaction — waiting for its late response, or for its
+// 30-second spec deadline and closing the bearer on expiry — so cancellation
+// never causes a later request to consume a stale response.
+//
 // Teardown paths (CancelConnection) deliberately take no context so that a
 // client can always be torn down, even when no request context is available.
 type Client interface {
