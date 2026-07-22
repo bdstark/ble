@@ -17,13 +17,13 @@ import (
 // Shared test helpers
 // ---------------------------------------------------------------------------
 
-// swapLogger installs l as ble.Logger for the duration of the test. Tests
-// using it must not run in parallel (package-level state).
+// swapLogger installs l as the package logger for the duration of the test.
+// Tests using it must not run in parallel (package-level state).
 func swapLogger(t *testing.T, l *slog.Logger) {
 	t.Helper()
-	old := ble.Logger
-	ble.Logger = l
-	t.Cleanup(func() { ble.Logger = old })
+	old := ble.Logger()
+	ble.SetLogger(l)
+	t.Cleanup(func() { ble.SetLogger(old) })
 }
 
 // quietLogger discards log output at the default (info) level.

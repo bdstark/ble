@@ -50,7 +50,7 @@ func NewDevice(opts ...ble.Option) (*Device, error) {
 	for _, opt := range opts {
 		if err := opt(d); err != nil {
 			if errors.Is(err, ble.ErrUnsupportedOption) {
-				ble.Logger.Warn("darwin: ignoring option", "err", err)
+				ble.Logger().Warn("darwin: ignoring option", "err", err)
 				continue
 			}
 			return nil, err

@@ -11,5 +11,5 @@ import (
 // cost a format pass and an allocation per ATT operation, which must not
 // be paid while debug logging is off.
 func logDebugEnabled() bool {
-	return ble.Logger.Enabled(context.Background(), slog.LevelDebug)
+	return ble.Logger().Enabled(context.Background(), slog.LevelDebug)
 }

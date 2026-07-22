@@ -496,7 +496,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 		return nil, err
 	}
 	if logDebugEnabled() {
-		ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
+		ble.Logger().Debug("client req", "pdu", fmt.Sprintf("% X", b))
 	}
 	// Defense in depth: with no abandoned transaction outstanding, anything
 	// sitting in rspc is a response PDU the peer sent unsolicited — drop it
@@ -508,7 +508,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 	select {
 	case stale := <-c.rspc:
 		if logDebugEnabled() {
-			ble.Logger.Debug("client: dropping unsolicited rsp", "pdu", fmt.Sprintf("% X", stale))
+			ble.Logger().Debug("client: dropping unsolicited rsp", "pdu", fmt.Sprintf("% X", stale))
 		}
 	default:
 	}
@@ -533,7 +533,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			// the response to our request.
 			errRsp := newErrorResponse(rsp[0], 0x0000, ble.ErrReqNotSupp)
 			if logDebugEnabled() {
-				ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", b))
+				ble.Logger().Debug("client req", "pdu", fmt.Sprintf("% X", b))
 			}
 			_, err := c.l2c.Write(errRsp)
 			if err != nil {
@@ -562,7 +562,7 @@ func (c *Client) sendReq(ctx context.Context, b []byte) (rsp []byte, err error) 
 			// mis-attributed as that request's response.
 			c.bearerClosed.Store(true)
 			if err := c.l2c.Close(); err != nil {
-				ble.Logger.Error("client: closing bearer after ATT timeout", "err", err)
+				ble.Logger().Error("client: closing bearer after ATT timeout", "err", err)
 			}
 			return nil, fmt.Errorf("ATT request timeout: %w", ErrSeqProtoTimeout)
 		}
@@ -594,7 +594,7 @@ func (c *Client) resolveAbandoned(ctx context.Context) error {
 			if rsp[0] == ErrorResponseCode || rsp[0] == c.abandonedRsp {
 				c.abandonedRsp = 0
 				if logDebugEnabled() {
-					ble.Logger.Debug("client: dropping late rsp of an abandoned request", "pdu", fmt.Sprintf("% X", rsp))
+					ble.Logger().Debug("client: dropping late rsp of an abandoned request", "pdu", fmt.Sprintf("% X", rsp))
 				}
 				return nil
 			}
@@ -618,7 +618,7 @@ func (c *Client) resolveAbandoned(ctx context.Context) error {
 		case <-t.C:
 			c.bearerClosed.Store(true)
 			if err := c.l2c.Close(); err != nil {
-				ble.Logger.Error("client: closing bearer after ATT timeout", "err", err)
+				ble.Logger().Error("client: closing bearer after ATT timeout", "err", err)
 			}
 			return fmt.Errorf("ATT request timeout (abandoned request never answered): %w", ErrSeqProtoTimeout)
 		}
@@ -674,7 +674,7 @@ func (c *Client) Loop() {
 	for {
 		n, err := c.l2c.Read(c.rxBuf)
 		if logDebugEnabled() {
-			ble.Logger.Debug("client rsp", "pdu", fmt.Sprintf("% X", c.rxBuf[:n]))
+			ble.Logger().Debug("client rsp", "pdu", fmt.Sprintf("% X", c.rxBuf[:n]))
 		}
 		if err != nil {
 			// We don't expect any error from the bearer (L2CAP ACL-U)
@@ -688,7 +688,7 @@ func (c *Client) Loop() {
 			// previous PDU. Classifying on it would ship an empty PDU as a
 			// response (sendReq indexes rsp[0]) or as a notification (the
 			// gatt dispatcher parses a handle from it) — both panic.
-			ble.Logger.Warn("client: dropping zero-length ATT PDU")
+			ble.Logger().Warn("client: dropping zero-length ATT PDU")
 			continue
 		}
 
@@ -699,7 +699,7 @@ func (c *Client) Loop() {
 			// [Vol 3, Part F, 3.4.7.1-2]; anything shorter would panic the
 			// handle parse downstream. Still acknowledge a runt indication
 			// so the peer's sequential protocol isn't left waiting on us.
-			ble.Logger.Warn("client: dropping runt notification/indication", "len", n)
+			ble.Logger().Warn("client: dropping runt notification/indication", "len", n)
 			if op == HandleValueIndicationCode {
 				_, _ = c.l2c.Write(confirmation)
 			}
@@ -721,7 +721,7 @@ func (c *Client) Loop() {
 			default:
 				c.rspDropped.Add(1)
 				if logDebugEnabled() {
-					ble.Logger.Debug("client: dropping unclaimed rsp", "pdu", fmt.Sprintf("% X", b))
+					ble.Logger().Debug("client: dropping unclaimed rsp", "pdu", fmt.Sprintf("% X", b))
 				}
 			}
 			continue
@@ -743,7 +743,7 @@ func (c *Client) Loop() {
 				pduPool.Put(buf)
 				c.asyncDropped.Add(1)
 				// If this really happens, especially on a slow machine, enlarge the channel buffer.
-				ble.Logger.Error("client: can't enqueue incoming request")
+				ble.Logger().Error("client: can't enqueue incoming request")
 			}
 			continue
 		}
@@ -755,13 +755,13 @@ func (c *Client) Loop() {
 			pduPool.Put(buf)
 			c.asyncDropped.Add(1)
 			// If this really happens, especially on a slow machine, enlarge the channel buffer.
-			ble.Logger.Error("client: can't enqueue incoming notification")
+			ble.Logger().Error("client: can't enqueue incoming notification")
 		}
 
 		// Always write aknowledgement for an indication, even it was an invalid request.
 		if op == HandleValueIndicationCode {
 			if logDebugEnabled() {
-				ble.Logger.Debug("client req", "pdu", fmt.Sprintf("% X", c.rxBuf[:n]))
+				ble.Logger().Debug("client req", "pdu", fmt.Sprintf("% X", c.rxBuf[:n]))
 			}
 			_, _ = c.l2c.Write(confirmation)
 		}
@@ -775,14 +775,14 @@ func (c *Client) handleRequest(b []byte) {
 		if len(resp) != 0 {
 			err := c.sendCmd(resp)
 			if err != nil {
-				ble.Logger.Error("client: error sending MTU response", "err", err)
+				ble.Logger().Error("client: error sending MTU response", "err", err)
 			}
 		}
 	default:
 		errRsp := newErrorResponse(b[0], 0x0000, ble.ErrReqNotSupp)
 		_ = c.sendCmd(errRsp)
 		// Abnormal path; eager formatting is acceptable here.
-		ble.Logger.Warn("client: received unhandled request", "pdu", fmt.Sprintf("[0x%X]", b))
+		ble.Logger().Warn("client: received unhandled request", "pdu", fmt.Sprintf("[0x%X]", b))
 	}
 }
 
@@ -832,7 +832,7 @@ func (c *Client) handleExchangeMTURequest(r ExchangeMTURequest) []byte {
 	rxMTU := c.l2c.RxMTU()
 
 	// Update transmit MTU to max supported by the other side
-	ble.Logger.Debug("client: server requested an MTU change", "tx", txMTU, "rx", rxMTU)
+	ble.Logger().Debug("client: server requested an MTU change", "tx", txMTU, "rx", rxMTU)
 	c.l2c.SetTxMTU(txMTU)
 
 	// Build the response in its own slice, never in txBuf: the deferred

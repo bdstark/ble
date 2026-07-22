@@ -129,9 +129,10 @@ go get github.com/bdstark/ble
 
 ### Observability & housekeeping
 
-- Logging is stdlib **`log/slog`** via the `ble.Logger` package variable
-  (logxi is gone). Hot-path debug sites check `Enabled` first, so debug-off
-  costs nothing.
+- Logging is stdlib **`log/slog`** via `ble.SetLogger` / `ble.Logger()`
+  (logxi is gone), with atomic access so the logger can be swapped safely
+  while a device runs. Hot-path debug sites check `Enabled` first, so
+  debug-off costs nothing.
 - `examples/` moved to
   [bdstark/ble-examples](https://github.com/bdstark/ble-examples); dead
   pre-cbgo darwin XPC code deleted; modern idiomatic Go throughout
@@ -310,10 +311,15 @@ hci.ACLWriteTimeout = 30 * time.Second  // wait for ACL buffer credits
 ### Logging
 
 ```go
-ble.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+ble.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
     Level: slog.LevelDebug,             // debug enables packet-level dumps
-}))
+})))
 ```
+
+`ble.SetLogger` is safe to call at any time — access is atomic, so
+reconfiguring logging on a running device doesn't race the stack's log
+sites. `ble.Logger()` returns the current logger (or `slog.Default()` if
+none was set).
 
 ### Peripheral role (advertising a GATT server)
 

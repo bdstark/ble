@@ -57,7 +57,7 @@ func loop(dev *hci.HCI, s *gatt.Server, mtu int) {
 			// An EOF error indicates that the HCI socket was closed during
 			// the read.  Don't report this as an error.
 			if err != io.EOF {
-				ble.Logger.Error("can't accept", "err", err)
+				ble.Logger().Error("can't accept", "err", err)
 			}
 			return
 		}
@@ -70,7 +70,7 @@ func loop(dev *hci.HCI, s *gatt.Server, mtu int) {
 		as, err := att.NewServer(s.DB(), l2c)
 		s.Unlock()
 		if err != nil {
-			ble.Logger.Error("can't create ATT server", "err", err)
+			ble.Logger().Error("can't create ATT server", "err", err)
 			continue
 
 		}

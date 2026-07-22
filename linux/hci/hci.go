@@ -520,9 +520,9 @@ func (h *HCI) sktLoop() {
 			// Some bluetooth devices may append vendor specific packets at the last,
 			// in this case, simply ignore them.
 			if strings.HasPrefix(err.Error(), "unsupported vendor packet:") {
-				ble.Logger.Error("skt: ignoring vendor packet", "err", err)
+				ble.Logger().Error("skt: ignoring vendor packet", "err", err)
 			} else {
-				ble.Logger.Error("skt: failed to handle packet", "err", err)
+				ble.Logger().Error("skt: failed to handle packet", "err", err)
 				continue
 			}
 		}
@@ -645,7 +645,7 @@ func (h *HCI) handleACL(b []byte) error {
 	c, ok := h.conns[handle]
 	h.muConns.Unlock()
 	if !ok {
-		ble.Logger.Warn("invalid connection handle on ACL packet", "handle", handle)
+		ble.Logger().Warn("invalid connection handle on ACL packet", "handle", handle)
 		return nil
 	}
 	// Non-blocking: this runs on sktLoop, the single dispatcher for every
@@ -662,7 +662,7 @@ func (h *HCI) handleACL(b []byte) error {
 		// kill is once-per-conn: a burst of would-block packets spawns
 		// exactly one teardown goroutine and logs one warning.
 		if c.kill() {
-			ble.Logger.Warn("hci: connection not consuming ACL data; dropping packet and closing connection", "handle", handle)
+			ble.Logger().Warn("hci: connection not consuming ACL data; dropping packet and closing connection", "handle", handle)
 		}
 	}
 	return nil
@@ -690,7 +690,7 @@ func (h *HCI) handleEvt(b []byte) error {
 		// instead of storing it in h.err, where it would fail every
 		// subsequent Send until overwritten (and race with send's read).
 		if err := f(b[2:]); err != nil {
-			ble.Logger.Error("hci: event handler failed", "code", fmt.Sprintf("%#02x", code), "err", err)
+			ble.Logger().Error("hci: event handler failed", "code", fmt.Sprintf("%#02x", code), "err", err)
 		}
 		return nil
 	}
@@ -943,7 +943,7 @@ func (h *HCI) handleLEConnectionComplete(b []byte) error {
 		// inbound connection. connectedHandler is not invoked either —
 		// it used to fire for failed slave connects, handing the
 		// application an event for a connection that never existed.
-		ble.Logger.Warn("hci: connection failed to establish", "role", e.Role(), "status", ErrCommand(e.Status()).Error())
+		ble.Logger().Warn("hci: connection failed to establish", "role", e.Role(), "status", ErrCommand(e.Status()).Error())
 		return nil
 	}
 	// Status is 0x00 from here on (failures returned above).
@@ -1006,7 +1006,7 @@ func (h *HCI) handleLEConnectionUpdateComplete(b []byte) error {
 	h.muConns.Unlock()
 	if !found {
 		if logDebugEnabled() {
-			ble.Logger.Debug("hci: LE connection update complete for unknown handle",
+			ble.Logger().Debug("hci: LE connection update complete for unknown handle",
 				"handle", e.ConnectionHandle(), "status", e.Status())
 		}
 		return nil
@@ -1039,7 +1039,7 @@ func (h *HCI) handleLEDataLengthChange(b []byte) error {
 	h.muConns.Unlock()
 	if !found {
 		if logDebugEnabled() {
-			ble.Logger.Debug("hci: LE data length change for unknown handle", "handle", e.ConnectionHandle())
+			ble.Logger().Debug("hci: LE data length change for unknown handle", "handle", e.ConnectionHandle())
 		}
 		return nil
 	}
@@ -1050,7 +1050,7 @@ func (h *HCI) handleLEDataLengthChange(b []byte) error {
 		maxRxTime:   e.MaxRxTime(),
 	})
 	if logDebugEnabled() {
-		ble.Logger.Debug("hci: LE data length change",
+		ble.Logger().Debug("hci: LE data length change",
 			"handle", e.ConnectionHandle(),
 			"maxTxOctets", e.MaxTxOctets(), "maxTxTime", e.MaxTxTime(),
 			"maxRxOctets", e.MaxRxOctets(), "maxRxTime", e.MaxRxTime())
@@ -1136,7 +1136,7 @@ func (h *HCI) handleLELongTermKeyRequest(b []byte) error {
 		if err := h.Send(&cmd.LELongTermKeyRequestNegativeReply{
 			ConnectionHandle: handle,
 		}, nil); err != nil {
-			ble.Logger.Error("hci: LE long term key negative reply failed", "handle", handle, "err", err)
+			ble.Logger().Error("hci: LE long term key negative reply failed", "handle", handle, "err", err)
 		}
 	}()
 	return nil

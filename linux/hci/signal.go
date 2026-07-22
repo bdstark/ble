@@ -103,14 +103,14 @@ func (c *Conn) sendResponse(code uint8, id uint8, r Signal) (int, error) {
 		return 0, err
 	}
 	if logDebugEnabled() {
-		ble.Logger.Debug("sig send", "pdu", fmt.Sprintf("[%X]", buf.Bytes()))
+		ble.Logger().Debug("sig send", "pdu", fmt.Sprintf("[%X]", buf.Bytes()))
 	}
 	return c.writePDU(buf.Bytes())
 }
 
 func (c *Conn) handleSignal(p pdu) error {
 	if logDebugEnabled() {
-		ble.Logger.Debug("sig recv", "pdu", fmt.Sprintf("[%X]", p))
+		ble.Logger().Debug("sig recv", "pdu", fmt.Sprintf("[%X]", p))
 	}
 	// When multiple commands are included in an L2CAP packet and the packet
 	// exceeds the signaling MTU (MTUsig) of the receiver, a single Command Reject
@@ -126,7 +126,7 @@ func (c *Conn) handleSignal(p pdu) error {
 				Data:   []byte{uint8(c.sigRxMTU), uint8(c.sigRxMTU >> 8)}, // Actual MTUsig.
 			})
 		if err != nil {
-			ble.Logger.Error("sig: send response failed", "err", err)
+			ble.Logger().Error("sig: send response failed", "err", err)
 		}
 		return nil
 	}

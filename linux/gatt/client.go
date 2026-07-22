@@ -95,11 +95,11 @@ func (p *Client) Name() string {
 		return ""
 	}
 	if err != nil {
-		ble.Logger.Debug("gatt: reading GAP device name", "err", err)
+		ble.Logger().Debug("gatt: reading GAP device name", "err", err)
 		return ""
 	}
 	if length < 2 || len(b) < length {
-		ble.Logger.Debug("gatt: malformed GAP device name response", "length", length, "data", len(b))
+		ble.Logger().Debug("gatt: malformed GAP device name response", "length", length, "data", len(b))
 		p.nameRead = true // deterministic peer bug; retrying won't unmangle it
 		return ""
 	}
@@ -109,7 +109,7 @@ func (p *Client) Name() string {
 	h := binary.LittleEndian.Uint16(b[:2])
 	v, err := p.ac.Read(ctx, h)
 	if err != nil {
-		ble.Logger.Debug("gatt: reading GAP device name value", "handle", h, "err", err)
+		ble.Logger().Debug("gatt: reading GAP device name value", "handle", h, "err", err)
 		return ""
 	}
 	p.name = string(v)
@@ -587,7 +587,7 @@ func (p *Client) HandleNotification(req []byte) {
 		// Opcode + 2-byte attribute handle is the spec minimum. att.Client
 		// drops runts before dispatch; this guards the exported entry point
 		// against other callers.
-		ble.Logger.Warn("gatt: dropping runt notification/indication", "len", len(req))
+		ble.Logger().Warn("gatt: dropping runt notification/indication", "len", len(req))
 		return
 	}
 	vh := att.HandleValueIndication(req).AttributeHandle()
@@ -603,7 +603,7 @@ func (p *Client) HandleNotification(req []byte) {
 	p.subsMu.RUnlock()
 	if !ok {
 		// FIXME: disconnects and propagate an error to the user.
-		ble.Logger.Warn("gatt: got an unregistered notification")
+		ble.Logger().Warn("gatt: got an unregistered notification")
 		return
 	}
 	if fn != nil {

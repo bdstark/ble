@@ -203,7 +203,7 @@ func newConn(h *HCI, param evt.LEConnectionComplete) *Conn {
 			// (Log before the close below: the close is what observers
 			// wait on, so anything sequenced after it may outrun them.)
 			if err != io.EOF && !errors.Is(err, ErrClosed) {
-				ble.Logger.Error("recombine failed, closing connection", "err", err)
+				ble.Logger().Error("recombine failed, closing connection", "err", err)
 				c.kill()
 			}
 			// Unblock current and future Reads: once chInPDU is closed,
@@ -439,7 +439,7 @@ func (c *Conn) recombine() error {
 		c.handleSMP(p)
 	default:
 		// Abnormal path (unknown channel); eager formatting is acceptable here.
-		ble.Logger.Info("recombine: unrecognized CID", "cid", fmt.Sprintf("%04X", p.cid()), "pdu", fmt.Sprintf("[%X]", p))
+		ble.Logger().Info("recombine: unrecognized CID", "cid", fmt.Sprintf("%04X", p.cid()), "pdu", fmt.Sprintf("[%X]", p))
 	}
 	return nil
 }
@@ -766,7 +766,7 @@ func (c *Conn) Close() error {
 	case <-c.chDone:
 		// The event (or a whole-adapter teardown) got here after all.
 	case <-t.C:
-		ble.Logger.Warn("hci: no disconnection event after a failed Disconnect command; force-closing conn",
+		ble.Logger().Warn("hci: no disconnection event after a failed Disconnect command; force-closing conn",
 			"handle", c.param.ConnectionHandle(), "err", err)
 		c.hci.cleanupConn(c)
 	}

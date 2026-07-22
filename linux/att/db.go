@@ -147,13 +147,13 @@ func DumpAttributes(aa []*attr) {
 	if !logDebugEnabled() {
 		return
 	}
-	ble.Logger.Debug("server db: generating attribute table (handle, endh, type)")
+	ble.Logger().Debug("server db: generating attribute table (handle, endh, type)")
 	for _, a := range aa {
 		if a.v != nil {
-			ble.Logger.Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s [% X]", a.h, a.endh, a.typ, a.v))
+			ble.Logger().Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s [% X]", a.h, a.endh, a.typ, a.v))
 			continue
 		}
-		ble.Logger.Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s", a.h, a.endh, a.typ))
+		ble.Logger().Debug("server db", "attr", fmt.Sprintf("0x%04X 0x%04X 0x%s", a.h, a.endh, a.typ))
 	}
 }
 

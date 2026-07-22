@@ -128,7 +128,7 @@ func (s *Server) indicate(h uint16, data []byte) (int, error) {
 	select {
 	case _, ok := <-s.chConfirm:
 		if ok {
-			ble.Logger.Error("server: dropping a spurious confirmation (no indication was outstanding)")
+			ble.Logger().Error("server: dropping a spurious confirmation (no indication was outstanding)")
 		}
 	default:
 	}
@@ -181,7 +181,7 @@ func (s *Server) Loop() {
 				select {
 				case s.chConfirm <- true:
 				default:
-					ble.Logger.Error("server: received a spurious confirmation")
+					ble.Logger().Error("server: received a spurious confirmation")
 				}
 				continue
 			}
@@ -195,14 +195,14 @@ func (s *Server) Loop() {
 			if _, err := s.conn.Write(rsp); err != nil {
 				// The bearer is dying; the reader goroutine will observe the
 				// same failure and shut the loop down.
-				ble.Logger.Error("server: failed to write response", "err", err)
+				ble.Logger().Error("server: failed to write response", "err", err)
 			}
 		}
 		pool <- req
 	}
 	for h, ccc := range s.conn.cccs {
 		if ccc != 0 {
-			ble.Logger.Info("server cleanup", "ccc", fmt.Sprintf("0x%02X", ccc))
+			ble.Logger().Info("server cleanup", "ccc", fmt.Sprintf("0x%02X", ccc))
 		}
 		if ccc&cccIndicate != 0 {
 			s.conn.in[h].Close()
@@ -216,7 +216,7 @@ func (s *Server) Loop() {
 func (s *Server) handleRequest(b []byte) []byte {
 	var resp []byte
 	if logDebugEnabled() {
-		ble.Logger.Debug("server req", "pdu", fmt.Sprintf("% X", b))
+		ble.Logger().Debug("server req", "pdu", fmt.Sprintf("% X", b))
 	}
 	switch reqType := b[0]; reqType {
 	case ExchangeMTURequestCode:
@@ -248,7 +248,7 @@ func (s *Server) handleRequest(b []byte) []byte {
 		resp = newErrorResponse(reqType, 0x0000, ble.ErrReqNotSupp)
 	}
 	if logDebugEnabled() {
-		ble.Logger.Debug("server rsp", "pdu", fmt.Sprintf("% X", resp))
+		ble.Logger().Debug("server rsp", "pdu", fmt.Sprintf("% X", resp))
 	}
 	return resp
 }
@@ -617,7 +617,7 @@ func (s *Server) handlePrepareWriteRequest(r PrepareWriteRequest) []byte {
 		return newErrorResponse(r.AttributeOpcode(), 0x0000, ble.ErrInvalidPDU)
 	}
 	if logDebugEnabled() {
-		ble.Logger.Debug("handlePrepareWriteRequest", "handle", r.AttributeHandle())
+		ble.Logger().Debug("handlePrepareWriteRequest", "handle", r.AttributeHandle())
 	}
 
 	a, ok := s.db.at(r.AttributeHandle())

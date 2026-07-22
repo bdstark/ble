@@ -18,9 +18,8 @@ import (
 
 // debugLogging toggles the level of the process-wide test logger. It is an
 // atomic because goroutines leaked by earlier tests (e.g. a client Loop
-// parked in Read) may still consult the logger; the ble.Logger variable
-// itself is written exactly once, in TestMain, before any test goroutine
-// exists, so it is never raced.
+// parked in Read) may still consult the logger; the logger itself is
+// installed exactly once, in TestMain, before any test goroutine exists.
 var debugLogging atomic.Bool
 
 type levelToggleHandler struct {
@@ -36,10 +35,10 @@ func (h levelToggleHandler) Enabled(ctx context.Context, l slog.Level) bool {
 }
 
 func TestMain(m *testing.M) {
-	ble.Logger = slog.New(levelToggleHandler{
+	ble.SetLogger(slog.New(levelToggleHandler{
 		Handler: slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}),
 		debug:   &debugLogging,
-	})
+	}))
 	os.Exit(m.Run())
 }
 

@@ -38,7 +38,7 @@ func (c *Conn) sendSMP(p pdu) error {
 	binary.LittleEndian.PutUint16(frame[2:4], cidSMP)
 	copy(frame[4:], p)
 	if logDebugEnabled() {
-		ble.Logger.Debug("smp send", "pdu", fmt.Sprintf("[%X]", frame))
+		ble.Logger().Debug("smp send", "pdu", fmt.Sprintf("[%X]", frame))
 	}
 	_, err := c.writePDU(frame)
 	return err
@@ -50,12 +50,12 @@ func (c *Conn) sendSMP(p pdu) error {
 // command is answered with Pairing Failed / Pairing Not Supported.
 func (c *Conn) handleSMP(p pdu) error {
 	if logDebugEnabled() {
-		ble.Logger.Debug("smp recv", "pdu", fmt.Sprintf("[%X]", p))
+		ble.Logger().Debug("smp recv", "pdu", fmt.Sprintf("[%X]", p))
 	}
 	// A frame too short to carry an opcode is malformed; drop it rather
 	// than trusting the peer's framing.
 	if len(p) < 4+1 {
-		ble.Logger.Error("smp: dropping truncated PDU", "pdu", fmt.Sprintf("[%X]", p))
+		ble.Logger().Error("smp: dropping truncated PDU", "pdu", fmt.Sprintf("[%X]", p))
 		return nil
 	}
 	code := p.payload()[0]

@@ -23,9 +23,12 @@ python3 tools/diffcover.py . 8c5522f..HEAD /tmp/cover.out
 | All added lines | **91.7%** (1521/1658) |
 | Added lines excluding `darwin/` | **99.6%** (1521/1527) |
 
-The post-v0.1.0 tranche (prepared-write queue, params locking, adv-field
-overflow fix, fuzz targets) lands at **100% of its added lines** (159/159),
-measured with `diffcover.py . v0.1.0 <cover.out>`.
+The post-v0.1.0 work (prepared-write queue, params locking, adv-field
+overflow fix, fuzz targets, atomic `SetLogger`/`Logger()`) covers **every
+added line outside the documented exclusions**, measured with
+`diffcover.py . v0.1.0 <cover.out>`: the only misses are the darwin
+`ble.Logger()` call sites (hardware-bound, same category as the rest of
+`darwin/`) and the pre-existing dead branch at `linux/device.go:73`.
 
 Every changed file is at 100% of its added lines except the ones below.
 The linux backend is pure Go above the socket layer, so all of it —

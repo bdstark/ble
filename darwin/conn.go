@@ -229,7 +229,7 @@ func (c *conn) processChrRead(err error, cbchr cbgo.Characteristic) {
 	}
 
 	if !found {
-		ble.Logger.Warn("received characteristic read response without corresponding request", "uuid", uuidStr)
+		ble.Logger().Warn("received characteristic read response without corresponding request", "uuid", uuidStr)
 	}
 }
 

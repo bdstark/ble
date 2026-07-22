@@ -92,11 +92,11 @@ func defaultServicesWithHandler(name string, handler ble.NotifyHandler) []*ble.S
 }
 
 func defaultHanderFunc(r ble.Request, n ble.Notifier) {
-	ble.Logger.Info("gatt: TODO: indicate client when the services are changed")
+	ble.Logger().Info("gatt: TODO: indicate client when the services are changed")
 	for {
 		select {
 		case <-n.Context().Done():
-			ble.Logger.Info("gatt: notification unsubscribed")
+			ble.Logger().Info("gatt: notification unsubscribed")
 			return
 		}
 	}

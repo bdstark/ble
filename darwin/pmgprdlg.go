@@ -38,7 +38,7 @@ func (d *Device) DidReceiveReadRequest(pmgr cbgo.PeripheralManager, cbreq cbgo.A
 		var err error
 		c, err = newPeripheralConn(d, cbreq.Central())
 		if err != nil {
-			ble.Logger.Error("failed to process read response", "err", err)
+			ble.Logger().Error("failed to process read response", "err", err)
 			return
 		}
 	}
@@ -64,7 +64,7 @@ func (d *Device) DidReceiveWriteRequests(pmgr cbgo.PeripheralManager, cbreqs []c
 			var err error
 			c, err = newPeripheralConn(d, cbreq.Central())
 			if err != nil {
-				ble.Logger.Error("failed to process write response", "err", err)
+				ble.Logger().Error("failed to process write response", "err", err)
 				return
 			}
 		}
@@ -87,7 +87,7 @@ func (d *Device) CentralDidSubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Cent
 		var err error
 		c, err = newPeripheralConn(d, cent)
 		if err != nil {
-			ble.Logger.Error("failed to process subscribe request", "err", err)
+			ble.Logger().Error("failed to process subscribe request", "err", err)
 			return
 		}
 	}
@@ -122,7 +122,7 @@ func (d *Device) CentralDidUnsubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Ce
 		var err error
 		c, err = newPeripheralConn(d, cent)
 		if err != nil {
-			ble.Logger.Error("failed to process unsubscribe request", "err", err)
+			ble.Logger().Error("failed to process unsubscribe request", "err", err)
 			return
 		}
 	}
@@ -130,7 +130,7 @@ func (d *Device) CentralDidUnsubscribe(pmgr cbgo.PeripheralManager, cent cbgo.Ce
 	n := c.notifiers[chr]
 	if n != nil {
 		if err := n.Close(); err != nil {
-			ble.Logger.Error("failed to close notifier", "err", err)
+			ble.Logger().Error("failed to close notifier", "err", err)
 		}
 		delete(c.notifiers, chr)
 	}
