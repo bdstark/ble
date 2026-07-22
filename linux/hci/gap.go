@@ -11,6 +11,7 @@ import (
 	"github.com/bdstark/ble"
 	"github.com/bdstark/ble/linux/adv"
 	"github.com/bdstark/ble/linux/gatt"
+	"github.com/bdstark/ble/linux/hci/cmd"
 )
 
 // Addr ...
@@ -36,20 +37,31 @@ func (h *HCI) SetAdvHandler(ah ble.AdvHandler) error {
 // completion was dropped (observed in production 2026-07-19: every scan
 // failed with Disallowed for 20 hours). Reconcile by stopping the unknown
 // scan and enabling once more.
+// Params-locking discipline (here and in every h.params user): mutate the
+// shared command struct under h.params.Lock, take a value copy, unlock, and
+// Send the COPY. Send blocks for up to the command timeout, so holding the
+// lock across it would stall sktLoop's RLock readers; and Send marshals the
+// struct, so sending the shared field would race a concurrent mutator.
 func (h *HCI) Scan(allowDup bool) error {
+	h.params.Lock()
 	h.params.scanEnable.FilterDuplicates = 1
 	if allowDup {
 		h.params.scanEnable.FilterDuplicates = 0
 	}
 	h.params.scanEnable.LEScanEnable = 1
+	se := h.params.scanEnable
+	h.params.Unlock()
 	h.resetAdHistory()
-	err := h.Send(&h.params.scanEnable, nil)
+	err := h.Send(&se, nil)
 	if err == ErrDisallowed {
 		if serr := h.StopScanning(); serr != nil {
 			return fmt.Errorf("hci: scan disallowed and reconciling stop failed: %w", serr)
 		}
+		h.params.Lock()
 		h.params.scanEnable.LEScanEnable = 1
-		err = h.Send(&h.params.scanEnable, nil)
+		se = h.params.scanEnable
+		h.params.Unlock()
+		err = h.Send(&se, nil)
 	}
 	return err
 }
@@ -57,8 +69,11 @@ func (h *HCI) Scan(allowDup bool) error {
 // StopScanning stops scanning. Command Disallowed means the controller is
 // not scanning — already the desired state, so it is reported as success.
 func (h *HCI) StopScanning() error {
+	h.params.Lock()
 	h.params.scanEnable.LEScanEnable = 0
-	err := h.Send(&h.params.scanEnable, nil)
+	se := h.params.scanEnable
+	h.params.Unlock()
+	err := h.Send(&se, nil)
 	if err == ErrDisallowed {
 		return nil
 	}
@@ -203,8 +218,11 @@ func (h *HCI) AdvertiseIBeacon(u ble.UUID, major, minor uint16, pwr int8) error 
 
 // StopAdvertising stops advertising.
 func (h *HCI) StopAdvertising() error {
+	h.params.Lock()
 	h.params.advEnable.AdvertisingEnable = 0
-	return h.Send(&h.params.advEnable, nil)
+	ae := h.params.advEnable
+	h.params.Unlock()
+	return h.Send(&ae, nil)
 }
 
 // Accept starts advertising and accepts connection.
@@ -229,19 +247,27 @@ func (h *HCI) Dial(ctx context.Context, a ble.Addr) (ble.Client, error) {
 	if err != nil {
 		return nil, ErrInvalidAddr
 	}
+	h.params.Lock()
 	h.params.connParams.PeerAddress = [6]byte{b[5], b[4], b[3], b[2], b[1], b[0]}
+	// Set the address type BOTH ways: the old code only ever set it to 1,
+	// so one dial to a random-address peer made every later public-address
+	// dial go out with the wrong type.
+	h.params.connParams.PeerAddressType = 0
 	if _, ok := a.(RandomAddress); ok {
 		h.params.connParams.PeerAddressType = 1
 	}
-	err = h.Send(&h.params.connParams, nil)
+	cp := h.params.connParams
+	h.params.Unlock()
+	err = h.Send(&cp, nil)
 	if err == ErrDisallowed {
 		// The controller is already initiating a connection the host has
 		// forgotten (a create abandoned by a send() completion timeout whose
 		// completion straggled in late). Cancel it and retry once; the
 		// cancel's LE Connection Complete (status: unknown connection id) is
 		// absorbed by handleLEConnectionComplete.
-		_ = h.Send(&h.params.connCancel, nil)
-		err = h.Send(&h.params.connParams, nil)
+		cc := cmd.LECreateConnectionCancel{}
+		_ = h.Send(&cc, nil)
+		err = h.Send(&cp, nil)
 	}
 	if err != nil {
 		return nil, err
@@ -292,7 +318,8 @@ var connCancelTimeout = 5 * time.Second
 
 // cancelDial cancels the Dialing
 func (h *HCI) cancelDial() (ble.Client, error) {
-	err := h.Send(&h.params.connCancel, nil)
+	cc := cmd.LECreateConnectionCancel{}
+	err := h.Send(&cc, nil)
 	if err == nil {
 		// The pending connection was canceled successfully.
 		return nil, errDialCanceled
@@ -316,8 +343,11 @@ func (h *HCI) cancelDial() (ble.Client, error) {
 
 // Advertise starts advertising.
 func (h *HCI) Advertise() error {
+	h.params.Lock()
 	h.params.advEnable.AdvertisingEnable = 1
-	return h.Send(&h.params.advEnable, nil)
+	ae := h.params.advEnable
+	h.params.Unlock()
+	return h.Send(&ae, nil)
 }
 
 // SetAdvertisement sets advertising data and scanResp.
@@ -326,15 +356,20 @@ func (h *HCI) SetAdvertisement(ad []byte, sr []byte) error {
 		return ble.ErrEIRPacketTooLong
 	}
 
+	h.params.Lock()
 	h.params.advData.AdvertisingDataLength = uint8(len(ad))
 	copy(h.params.advData.AdvertisingData[:], ad)
-	if err := h.Send(&h.params.advData, nil); err != nil {
-		return err
-	}
+	advData := h.params.advData
 
 	h.params.scanResp.ScanResponseDataLength = uint8(len(sr))
 	copy(h.params.scanResp.ScanResponseData[:], sr)
-	if err := h.Send(&h.params.scanResp, nil); err != nil {
+	scanResp := h.params.scanResp
+	h.params.Unlock()
+
+	if err := h.Send(&advData, nil); err != nil {
+		return err
+	}
+	if err := h.Send(&scanResp, nil); err != nil {
 		return err
 	}
 	return nil

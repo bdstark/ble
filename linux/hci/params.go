@@ -11,7 +11,6 @@ type params struct {
 
 	advEnable  cmd.LESetAdvertiseEnable
 	scanEnable cmd.LESetScanEnable
-	connCancel cmd.LECreateConnectionCancel
 
 	advData    cmd.LESetAdvertisingData
 	scanResp   cmd.LESetScanResponseData

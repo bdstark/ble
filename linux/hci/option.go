@@ -27,13 +27,17 @@ func (h *HCI) SetListenerTimeout(d time.Duration) error {
 
 // SetConnParams overrides default connection parameters.
 func (h *HCI) SetConnParams(param cmd.LECreateConnection) error {
+	h.params.Lock()
 	h.params.connParams = param
+	h.params.Unlock()
 	return nil
 }
 
 // SetScanParams overrides default scanning parameters.
 func (h *HCI) SetScanParams(param cmd.LESetScanParameters) error {
+	h.params.Lock()
 	h.params.scanParams = param
+	h.params.Unlock()
 	return nil
 }
 
@@ -51,7 +55,9 @@ func (h *HCI) SetDisconnectedHandler(f func(evt.DisconnectionComplete)) error {
 
 // SetAdvParams overrides default advertising parameters.
 func (h *HCI) SetAdvParams(param cmd.LESetAdvertisingParameters) error {
+	h.params.Lock()
 	h.params.advParams = param
+	h.params.Unlock()
 	return nil
 }
 

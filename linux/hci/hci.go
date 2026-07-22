@@ -1042,7 +1042,10 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 		// was actually in advertising state. It does no harm though.
 		h.params.RLock()
 		if h.params.advEnable.AdvertisingEnable == 1 {
-			go h.Send(&h.params.advEnable, nil)
+			// Send a copy: the goroutine marshals it after RUnlock, which
+			// would otherwise race a concurrent StopAdvertising mutation.
+			ae := h.params.advEnable
+			go h.Send(&ae, nil)
 		}
 		h.params.RUnlock()
 	}
