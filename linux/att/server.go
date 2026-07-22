@@ -107,6 +107,15 @@ func (s *Server) indicate(h uint16, data []byte) (int, error) {
 		}
 		return n, nil
 	case <-time.After(seqProtoTimeout):
+		// Per [Vol 3, Part F, 3.3.3] no further ATT traffic is valid on
+		// this bearer after a transaction timeout — it "shall be closed".
+		// The close also plugs a mis-attribution hole: chConfirm carries
+		// no generation, so this indication's straggling confirmation
+		// would otherwise be consumed by the NEXT indicate() as its own
+		// answer. Closing the conn makes Loop's reader exit and close
+		// chConfirm, failing later indications fast (io.ErrClosedPipe) —
+		// the same poisoning the client applies after its timeouts.
+		_ = s.conn.Close()
 		return 0, ErrSeqProtoTimeout
 	}
 }

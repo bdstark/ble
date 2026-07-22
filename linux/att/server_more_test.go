@@ -594,3 +594,31 @@ func TestServerIndicateWire(t *testing.T) {
 		t.Fatalf("indicate after shutdown = %v, want io.ErrClosedPipe", err)
 	}
 }
+
+// TestIndicationTimeoutClosesBearer: an unconfirmed indication must poison
+// the bearer [Vol 3, Part F, 3.3.3] — chConfirm carries no generation, so
+// without the close, the timed-out indication's straggling confirmation
+// would be adopted by the NEXT indicate() as its own answer.
+func TestIndicationTimeoutClosesBearer(t *testing.T) {
+	old := seqProtoTimeout
+	seqProtoTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { seqProtoTimeout = old })
+
+	svc, _ := testService(nil)
+	f := newOnceConn()
+	s := newTestServer(t, f, svc)
+	done := make(chan struct{})
+	go func() { s.Loop(); close(done) }()
+
+	if _, err := s.indicate(3, []byte{0x11}); !errors.Is(err, ErrSeqProtoTimeout) {
+		t.Fatalf("unconfirmed indicate = %v, want ErrSeqProtoTimeout", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bearer not torn down after the indication timeout")
+	}
+	if _, err := s.indicate(3, []byte{0x22}); err == nil {
+		t.Fatal("indicate on a timed-out bearer succeeded (stale confirmation adoptable)")
+	}
+}
