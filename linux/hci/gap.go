@@ -34,8 +34,7 @@ func (h *HCI) Scan(allowDup bool) error {
 		h.params.scanEnable.FilterDuplicates = 0
 	}
 	h.params.scanEnable.LEScanEnable = 1
-	h.adHist = make([]*Advertisement, 128)
-	h.adLast = 0
+	h.resetAdHistory()
 	err := h.Send(&h.params.scanEnable, nil)
 	if err == ErrDisallowed {
 		if serr := h.StopScanning(); serr != nil {

@@ -106,7 +106,13 @@ type HCI struct {
 	// Upon receiving a SR, we search the AD history for the AD from the same
 	// device, and pass the Advertisiement (AD+SR) to advHandler.
 	// The adHist and adLast are allocated in the Scan().
+	// muAdHist guards adHist/adLast: handleLEAdvertisingReport reads and
+	// writes them on sktLoop while Scan() — notably its Disallowed
+	// reconciliation retries, which run precisely when the controller is
+	// still streaming reports — reallocates both from the caller's
+	// goroutine.
 	advHandler ble.AdvHandler
+	muAdHist   sync.Mutex
 	adHist     []*Advertisement
 	adLast     int
 
@@ -554,6 +560,17 @@ func (h *HCI) cleanupConns() {
 	}
 }
 
+// resetAdHistory clears the AD/SR pairing history for a fresh scan. Guarded
+// because Scan() — notably its Disallowed reconciliation, which runs while
+// the controller is still streaming reports — races the report handler on
+// sktLoop.
+func (h *HCI) resetAdHistory() {
+	h.muAdHist.Lock()
+	h.adHist = make([]*Advertisement, 128)
+	h.adLast = 0
+	h.muAdHist.Unlock()
+}
+
 // dispose runs c.Close on its own tracked goroutine. The goroutine is
 // mandatory for callers on sktLoop (kill, the undeliverable-conn paths in
 // handleLEConnectionComplete): Close sends a Disconnect command whose
@@ -696,6 +713,10 @@ func (h *HCI) handleLEAdvertisingReport(b []byte) error {
 
 	var orphanErr error
 	e := evt.LEAdvertisingReport(b)
+	// The whole event is processed under muAdHist: every arm of the switch
+	// below touches adHist/adLast, which Scan() reallocates concurrently.
+	h.muAdHist.Lock()
+	defer h.muAdHist.Unlock()
 	for i := 0; i < int(e.NumReports()); i++ {
 		var a *Advertisement
 		switch e.EventType(i) {

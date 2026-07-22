@@ -236,3 +236,34 @@ func TestAddrCachedRandom(t *testing.T) {
 		t.Fatal("second Addr call allocated a fresh value (not cached)")
 	}
 }
+
+// TestScanResetRacesAdvReports: Scan's history reset must not race the
+// report handler (run with -race). This is exactly the recovery mode of the
+// abandoned-scan reconciliation: the host re-arms Scan while the controller
+// is still streaming advertising reports, and both AD storage and SR
+// pairing walk the history the reset replaces.
+func TestScanResetRacesAdvReports(t *testing.T) {
+	h := newAdvHCI(1024)
+	ad := advReportPkt(evtTypAdvInd, 0x01, nil)
+	sr := advReportPkt(evtTypScanRsp, 0x01, nil)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = h.handleLEAdvertisingReport(ad)
+			_ = h.handleLEAdvertisingReport(sr)
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		h.resetAdHistory()
+	}
+	close(stop)
+	<-done
+}
